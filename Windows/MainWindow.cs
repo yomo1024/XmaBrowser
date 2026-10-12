@@ -444,11 +444,34 @@ public class MainWindow : Window
                 {
                     if (ImGui.Button("取消")) _plugin.Jobs.Cancel(job.Id);
                 }
-                else if (job.UsedBrowserChannel)
+                else
                 {
-                    ImGui.TextColored(Yellow, "🌐");
-                    if (ImGui.IsItemHovered())
-                        ImGui.SetTooltip("这次下载走了浏览器通道：" + job.BrowserReason);
+                    if (job.UsedBrowserChannel)
+                    {
+                        ImGui.TextColored(Yellow, "🌐");
+                        if (ImGui.IsItemHovered())
+                            ImGui.SetTooltip("这次下载走了浏览器通道：" + job.BrowserReason);
+                        ImGui.SameLine();
+                    }
+
+                    // 本机 Penumbra 的 SetModPath 不可用 → 把「分组目标路径」备好，配合 Penumbra 的 Move Mod 用
+                    if (job.GroupTargetPath.Length > 0)
+                    {
+                        if (ImGui.Button("复制分组路径##grp"))
+                            ImGui.SetClipboardText(job.GroupTargetPath);
+                        if (ImGui.IsItemHovered())
+                            ImGui.SetTooltip("复制：" + job.GroupTargetPath +
+                                             "\n然后到 Penumbra 里右键这条 Mod → Move Mod → 粘贴 → 回车");
+
+                        ImGui.SameLine();
+                        if (ImGui.Button("聚焦##focus"))
+                        {
+                            var dir = job.ModDirName.Length > 0 ? job.ModDirName : job.Title;
+                            _plugin.Penumbra.OpenModsTab(dir, job.Title);
+                        }
+                        if (ImGui.IsItemHovered())
+                            ImGui.SetTooltip("在 Penumbra 里打开这条 Mod（若你这版实现了 OpenMainWindow）");
+                    }
                 }
 
                 ImGui.PopID();

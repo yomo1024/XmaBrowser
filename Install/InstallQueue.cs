@@ -47,6 +47,15 @@ public sealed class InstallJob
     public string BrowserReason { get; set; } = string.Empty;
     /// <summary>站点上的类型（Gear / Hair / Skin…），用于装进文件夹的分组。</summary>
     public string SiteType { get; init; } = string.Empty;
+    /// <summary>
+    /// 自动归组不可用（本机 Penumbra 的 SetModPath 是空实现）时，给用户的**目标虚拟路径**：
+    /// 在 Penumbra 里右键该 Mod → Move Mod → 粘贴这个路径 → 回车，就分组好了。
+    /// </summary>
+    public string GroupTargetPath { get; set; } = string.Empty;
+
+    /// <summary>这条 Mod 在 Penumbra 里的目录名（聚焦窗口/移动时要用真实目录名）。</summary>
+    public string ModDirName { get; set; } = string.Empty;
+
     public DateTime StartedUtc { get; } = DateTime.UtcNow;
 
     public bool Finished => State is JobState.Done or JobState.Error or JobState.Cancelled;
@@ -434,18 +443,31 @@ public sealed class InstallQueue : IDisposable
         }
 
         // ---------- 4.5) 归入文件夹（Penumbra 的列表里就是可折叠的组）----------
-        if (_cfg.GroupIntoFolders && SetModPathNoOp)
-        {
-            job.Message += "（本机 Penumbra 的 SetModPath 不生效，已跳过归组）";
-            LogDiag("跳过归组：SetModPath 已判定为假成功");
-        }
-        else if (_cfg.GroupIntoFolders)
+        if (_cfg.GroupIntoFolders)
         {
             var folder = GroupPath.BuildFolder(_cfg.GroupTemplate, _cfg.GroupPrefix, job.SiteType,
                                                job.Author, job.ModId, job.Title);
-            var affected = newDirs.Concat(addedNames).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            if (folder.Length > 0 && affected.Count > 0)
-                GroupInstalled(job, folder, affected);
+
+            if (SetModPathNoOp)
+            {
+                // 本机 Penumbra 的 SetModPath 是空实现 → 不重试，改为给用户备好「目标虚拟路径」
+                var target = newDirs.Concat(addedNames).FirstOrDefault() is { Length: > 0 } d
+                    ? GroupPath.BuildFullPath(folder, d)
+                    : string.Empty;
+                if (target.Length > 0)
+                {
+                    job.GroupTargetPath = target;
+                    job.ModDirName = newDirs.Concat(addedNames).First();
+                    job.Message += $"（自动归组不可用：在 Penumbra 里对它右键 → Move Mod，粘贴 {target}）";
+                    LogDiag($"自动归组不可用，已备好目标路径：{target}");
+                }
+            }
+            else
+            {
+                var affected = newDirs.Concat(addedNames).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                if (folder.Length > 0 && affected.Count > 0)
+                    GroupInstalled(job, folder, affected);
+            }
         }
 
         // ---------- 5) 收尾 ----------
