@@ -12,6 +12,8 @@
 
   <ItemGroup>
     <PackageReference Include="HtmlAgilityPack" Version="1.11.65" />
+    <!-- 与插件同版本：测试要真的去读 .7z 夹具 -->
+    <PackageReference Include="SharpCompress" Version="1.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -23,6 +25,7 @@
     <Compile Include="..\..\Site\XmaParser.cs" />
     <Compile Include="..\..\Site\XmaClient.cs" />
     <Compile Include="..\..\Install\PackageResolver.cs" />
+    <Compile Include="..\..\Install\Archives\IArchiveReader.cs" />
     <Compile Include="..\..\Cover\CoverContext.cs" />
     <Compile Include="..\..\Cover\CoverLocator.cs" />
     <Compile Include="..\..\Cover\CoverInjector.cs" />

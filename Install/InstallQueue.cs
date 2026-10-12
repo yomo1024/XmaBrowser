@@ -236,53 +236,45 @@ public sealed class InstallQueue : IDisposable
         var workDir = Path.Combine(_workRoot, "extract", job.Id);
         Directory.CreateDirectory(workDir);
 
-        var packages = new List<string>();
-        string? looseInstallName = null;
+        // 结构探测：容器里可能有多个包、可能一个包都没有、也可能根本不是 Mod（见 PackageResolver.BuildPlan）
+        var plan = PackageResolver.BuildPlan(dest, workDir);
+        if (!plan.Ok)
+            throw new NotSupportedException(plan.Problem ?? "这个压缩包里没有可安装的内容");
 
-        switch (PackageResolver.KindOf(dest))
-        {
-            case PackageKind.PenumbraPackage:
-                packages.Add(dest);
-                break;
+        job.Message = plan.Summary;
+        Changed?.Invoke();
+        _log.Info($"{job.Title}：{plan.Summary}");
 
-            case PackageKind.Zip:
-            {
-                var inner = PackageResolver.ExtractInnerPackages(dest, workDir, out var err);
-                if (inner.Count > 0)
-                {
-                    packages.AddRange(inner);
-                    job.Message = inner.Count > 1 ? $"包里含 {inner.Count} 个包，逐个安装" : "包内找到 Mod 包";
-                }
-                else
-                {
-                    // 松散文件：解到 Penumbra 的 mod 根目录下，再用 AddMod 登记
-                    var modRoot = _penumbra.ModDirectory;
-                    if (string.IsNullOrEmpty(modRoot))
-                        throw new InvalidOperationException("拿不到 Penumbra 的 mod 目录，无法登记松散文件包");
-
-                    looseInstallName = PackageResolver.SafeModDirName(job.FileName, $"mod-{job.ModId}");
-                    var target = Path.Combine(modRoot, looseInstallName);
-                    if (!PackageResolver.ExtractLoose(dest, target, out var err2))
-                        throw new IOException(err2.Length > 0 ? err2 : "解压失败");
-
-                    job.Message = "松散文件：已放到 Penumbra mod 目录，准备登记";
-                    _ = err;
-                }
-                break;
-            }
-
-            default:
-                throw new NotSupportedException(
-                    $"暂不支持这种包（{Path.GetExtension(dest)}）。7z/rar 请先用工具转成 .pmp 或 .zip。");
-        }
+        var packages = plan.Packages;
 
         // ---------- 3) 装进 Penumbra ----------
         job.State = JobState.Installing;
-        job.Message = packages.Count > 0 ? $"安装 {packages.Count} 个包…" : "登记 mod…";
+        job.Message = packages.Count > 0 ? $"安装 {packages.Count} 个包…" : "登记 Mod 目录…";
         Changed?.Invoke();
 
         var before = _penumbra.Mods();
 
+        // 3a) 松散结构：每个目录单独作为一条 Mod（放到 Penumbra 的 mod 根目录下再 AddMod）
+        var addedNames = new List<string>();
+        if (plan.LooseMods.Count > 0)
+        {
+            var modRoot = _penumbra.ModDirectory;
+            if (string.IsNullOrEmpty(modRoot))
+                throw new InvalidOperationException("拿不到 Penumbra 的 mod 目录，无法登记没有内层包的压缩包");
+
+            Directory.CreateDirectory(modRoot);
+            foreach (var lm in plan.LooseMods)
+            {
+                var target = UniqueDirIn(modRoot, lm.SafeName);
+                MoveDirectory(lm.ExtractedDir, target);
+                var name = Path.GetFileName(target);
+                _penumbra.Add(name);
+                addedNames.Add(name);
+                _log.Info($"登记 Mod 目录：{name}（{lm.FileCount} 个文件）");
+            }
+        }
+
+        // 3b) 包：交给 InstallMod（封面先塞进包）
         var covered = 0;
         foreach (var p in packages)
         {
@@ -302,9 +294,6 @@ public sealed class InstallQueue : IDisposable
             _penumbra.Install(toInstall);
         }
 
-        if (looseInstallName is not null)
-            _penumbra.Add(looseInstallName);
-
         // 等 Penumbra 把新 mod 登记进来（ModAdded 是异步的）
         var newDirs = new List<string>();
         for (var i = 0; i < 40; i++)
@@ -320,13 +309,13 @@ public sealed class InstallQueue : IDisposable
             _log.Warn($"装完后没等出新 mod（{job.Title}）；Penumbra 可能仍在处理");
 
         // 封面兜底：包注入没成功（或包不是 zip）时，往 mod 目录补写 cover.<ext> / images/_MetaImage.<ext> / meta.json
-        if (job.CoverPath.Length > 0 && newDirs.Count > 0)
+        if (job.CoverPath.Length > 0 && (newDirs.Count > 0 || addedNames.Count > 0))
         {
             var modRoot = _penumbra.ModDirectory;
             if (!string.IsNullOrEmpty(modRoot))
             {
                 var applied = 0;
-                foreach (var dir in newDirs)
+                foreach (var dir in newDirs.Concat(addedNames).Distinct(StringComparer.OrdinalIgnoreCase))
                     if (CoverInjector.Apply(Path.Combine(modRoot, dir), job.CoverPath)) applied++;
                 if (applied > 0)
                     _log.Info($"已为 {applied} 个 mod 目录补写封面");
@@ -385,6 +374,60 @@ public sealed class InstallQueue : IDisposable
 
     private static string Mb(long n) => n > 1048576 ? (n / 1048576.0).ToString("0.0") + "MB"
                                                      : Math.Max(1, n / 1024) + "KB";
+
+    /// <summary>在 mod 根目录里找一个不冲突的目录名。</summary>
+    private static string UniqueDirIn(string root, string safeName)
+    {
+        var target = Path.Combine(root, safeName);
+        if (!Directory.Exists(target)) return target;
+        for (var i = 2; i < 1000; i++)
+        {
+            var p = Path.Combine(root, $"{safeName}_{i}");
+            if (!Directory.Exists(p)) return p;
+        }
+        return target;
+    }
+
+    /// <summary>
+    /// 把解出来的目录搬进 Penumbra 的 mod 根目录。
+    /// 临时目录通常在 C:，mod 根可能在别的盘 → Directory.Move 跨盘会抛，所以要能退回「复制 + 删」。
+    /// </summary>
+    private static void MoveDirectory(string src, string dst)
+    {
+        try
+        {
+            Directory.Move(src, dst);
+            return;
+        }
+        catch (IOException)
+        {
+            // 跨盘或目标已存在 → 复制过去
+        }
+
+        try
+        {
+            CopyDirectory(src, dst);
+            Directory.Delete(src, true);
+        }
+        catch
+        {
+            // 复制也没成：把源目录留在原处并让它作为 mod 目录（Penumbra 的 AddMod 只认根目录下的名字，
+            // 所以失败时向上抛，让队列把这条标记为失败并把原因说清楚）
+            throw new IOException($"无法把解出来的 Mod 目录搬进 {dst}（源：{src}）");
+        }
+    }
+
+    private static void CopyDirectory(string src, string dst)
+    {
+        Directory.CreateDirectory(dst);
+        foreach (var f in Directory.GetFiles(src, "*", SearchOption.AllDirectories))
+        {
+            var rel = Path.GetRelativePath(src, f);
+            var target = Path.Combine(dst, rel);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(f, target, true);
+        }
+    }
 
     public void Dispose()
     {

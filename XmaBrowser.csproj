@@ -1,7 +1,7 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
 
   <PropertyGroup>
-    <Version>0.2.0</Version>
+    <Version>0.2.1</Version>
     <Author>yomo1024</Author>
     <Name>XMA Browser</Name>
     <Punchline>在游戏里逛 XIV Mod Archive，点一下就装进 Penumbra。</Punchline>
@@ -23,9 +23,12 @@
   <ItemGroup>
     <!-- Penumbra 类型化 IPC：直接 new Xxx(pi).Invoke(...)，不手写 IPC 字符串 -->
     <PackageReference Include="Penumbra.Api" Version="5.19.2" />
-    <!-- HTML 解析（纯托管）。刻意不引 SharpCompress：0.38.0 有已知漏洞告警，而 XMA 上 .7z/.rar 极少，
-         zip 走 .NET 内置 System.IO.Compression -->
+    <!-- HTML 解析（纯托管） -->
     <PackageReference Include="HtmlAgilityPack" Version="1.11.65" />
+    <!-- 读 7z/rar/tar 等容器（zip 走 .NET 内置 System.IO.Compression）。
+         版本必须 >= 0.48.0：更低版本有 zip slip 变体告警 GHSA-6c8g-7p36-r338（会破坏 0 警告口径）。
+         本机实测 1.0.0 构建无告警；可读 Zip/Rar/7Zip/GZip/Tar/Arc/Arj/Ace，但**不支持写 7z**。 -->
+    <PackageReference Include="SharpCompress" Version="1.0.0" />
   </ItemGroup>
 
 </Project>

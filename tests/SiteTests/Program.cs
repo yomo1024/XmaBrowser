@@ -109,57 +109,96 @@ var ext = new ModDetail { DownloadHref = "https://www.patreon.com/posts/melting-
 Check("Patreon 链接判为外链", ext.IsExternalLink, ext.AbsoluteDownloadUrl);
 
 Console.WriteLine();
-Console.WriteLine("=== 9. 包解析（PackageResolver，离线造包）===");
+Console.WriteLine("=== 9. 包解析：容器结构探测（用真实 .7z 夹具 + 现造 zip）===");
 var tmp = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", Guid.NewGuid().ToString("n")[..8]);
 Directory.CreateDirectory(tmp);
+var fixDir = Path.Combine(AppContext.BaseDirectory, "samples", "archives");
+string Fix(string name) => Path.Combine(fixDir, name);
 try
 {
     Check("扩展名分类：.pmp 是包", PackageResolver.KindOf("a.pmp") == PackageKind.PenumbraPackage);
     Check("扩展名分类：.ttmp2 是包", PackageResolver.KindOf("a.ttmp2") == PackageKind.PenumbraPackage);
-    Check("扩展名分类：.zip 是压缩包", PackageResolver.KindOf("a.zip") == PackageKind.Zip);
-    Check("扩展名分类：.7z 不支持", PackageResolver.KindOf("a.7z") == PackageKind.Unsupported);
+    Check("扩展名分类：.zip 是容器", PackageResolver.KindOf("a.zip") == PackageKind.Container);
+    Check("扩展名分类：.7z 是容器（现在支持了）", PackageResolver.KindOf("a.7z") == PackageKind.Container);
+    Check("扩展名分类：.rar 是容器（现在支持了）", PackageResolver.KindOf("a.rar") == PackageKind.Container);
+    Check("扩展名分类：.exe 仍不支持", PackageResolver.KindOf("a.exe") == PackageKind.Unsupported);
 
-    var innerPmp = Path.Combine(tmp, "with_inner.zip");
-    using (var z = ZipFile.Open(innerPmp, ZipArchiveMode.Create))
+    // ---- 9.1 容器里有多个 Mod 包 ----
+    var planMulti = PackageResolver.BuildPlan(Fix("multi_pmp.7z"), Path.Combine(tmp, "w1"));
+    Console.WriteLine("   多包容器：" + planMulti.Summary);
+    Check("多包：两个包都被找出来", planMulti.Packages.Count == 2, string.Join(",", planMulti.Packages.Select(Path.GetFileName)));
+    Check("多包：包名保留（含空格）", planMulti.Packages.Any(p => Path.GetFileName(p).Contains("Alpha Hair")),
+          string.Join(",", planMulti.Packages.Select(Path.GetFileName)));
+    Check("多包：文件真的解出来了", planMulti.Packages.All(File.Exists));
+    Check("多包：说明文字点出数量 2", planMulti.Summary.Contains("2"), planMulti.Summary);
+
+    // ---- 9.2 没有包，但每个子目录是一个 Mod ----
+    var planSubs = PackageResolver.BuildPlan(Fix("mods_in_subfolders.7z"), Path.Combine(tmp, "w2"));
+    Console.WriteLine("   多 Mod 目录：" + planSubs.Summary);
+    Check("多 Mod 目录：识别出 2 个", planSubs.LooseMods.Count == 2,
+          string.Join(",", planSubs.LooseMods.Select(m => m.SafeName)));
+    Check("多 Mod 目录：名字是 ModA / ModB",
+          planSubs.LooseMods.Any(m => m.SafeName == "ModA") && planSubs.LooseMods.Any(m => m.SafeName == "ModB"),
+          string.Join(",", planSubs.LooseMods.Select(m => m.SafeName)));
+    Check("多 Mod 目录：内容已解出（meta.json 在各自目录里）",
+          planSubs.LooseMods.All(m => File.Exists(Path.Combine(m.ExtractedDir, "meta.json"))));
+    Check("多 Mod 目录：files/ 子目录也解出来了",
+          planSubs.LooseMods.All(m => Directory.Exists(Path.Combine(m.ExtractedDir, "files"))));
+    Check("多 Mod 目录：顶层 readme.txt 没被当成一个 Mod",
+          planSubs.LooseMods.All(m => m.SafeName != "readme.txt"));
+
+    // ---- 9.3 没有包，整体就是一个 Mod ----
+    var planLoose = PackageResolver.BuildPlan(Fix("loose_mod.7z"), Path.Combine(tmp, "w3"));
+    Console.WriteLine("   整体一个 Mod：" + planLoose.Summary);
+    Check("整体是 Mod：识别为 1 个", planLoose.LooseMods.Count == 1);
+    Check("整体是 Mod：拿到 default_mod.json 与 files/",
+          planLoose.LooseMods.Count == 1 &&
+          File.Exists(Path.Combine(planLoose.LooseMods[0].ExtractedDir, "default_mod.json")) &&
+          Directory.Exists(Path.Combine(planLoose.LooseMods[0].ExtractedDir, "files")));
+
+    // ---- 9.4 完全不像 Mod ----
+    var planJunk = PackageResolver.BuildPlan(Fix("junk.7z"), Path.Combine(tmp, "w4"));
+    Console.WriteLine("   不像 Mod：" + (planJunk.Problem ?? planJunk.Summary));
+    Check("不像 Mod：判定为装不了", !planJunk.Ok);
+    Check("不像 Mod：说明里列出顶层内容（readme.txt）",
+          planJunk.Problem is not null && planJunk.Problem.Contains("readme.txt"), planJunk.Problem ?? "null");
+    Check("不像 Mod：说明里点出「没有 Mod 包」",
+          planJunk.Problem is not null && planJunk.Problem.Contains("没有 Mod 包"));
+
+    // ---- 9.5 包藏在多层子目录里 ----
+    var planNested = PackageResolver.BuildPlan(Fix("nested_pmp.7z"), Path.Combine(tmp, "w5"));
+    Console.WriteLine("   嵌套包：" + planNested.Summary);
+    Check("嵌套包：能挖出来", planNested.Packages.Count == 1 && planNested.Packages[0].EndsWith(".pmp"),
+          string.Join(",", planNested.Packages));
+
+    // ---- 9.6 zip 走同一条路（逻辑只有一份）----
+    var innerZip = Path.Combine(tmp, "with_inner.zip");
+    using (var z = ZipFile.Open(innerZip, ZipArchiveMode.Create))
     {
         WriteEntry(z, "Sub Mod.pmp", "PK\x03\x04inner");
         WriteEntry(z, "__MACOSX/junk.txt", "junk");
         WriteEntry(z, "readme.txt", "hello");
     }
-    var found = PackageResolver.ExtractInnerPackages(innerPmp, Path.Combine(tmp, "inner"), out var e1);
-    Console.WriteLine($"   内层包：{string.Join(", ", found.Select(Path.GetFileName))}（错误：{(e1.Length > 0 ? e1 : "无")}）");
-    Check("能取出内层 .pmp", found.Count == 1 && found[0].EndsWith(".pmp"), string.Join(",", found));
-    Check("内层包文件真的落盘了", found.Count == 1 && File.Exists(found[0]));
-    Check("取出包时不再解出松散文件", !File.Exists(Path.Combine(tmp, "inner", "readme.txt")));
+    var planZip = PackageResolver.BuildPlan(innerZip, Path.Combine(tmp, "w6"));
+    Check("zip：同一条逻辑也能取出内层包", planZip.Packages.Count == 1 && planZip.Packages[0].EndsWith(".pmp"),
+          planZip.Summary);
 
-    var looseZip = Path.Combine(tmp, "loose.zip");
-    using (var z = ZipFile.Open(looseZip, ZipArchiveMode.Create))
-    {
-        WriteEntry(z, "textures/foo.tex", "data");
-        WriteEntry(z, "default_mod.json", "{}");
-        WriteEntry(z, "./implicit.pmp", "PK\x03\x04x");
-        WriteEntry(z, "__MACOSX/._junk", "junk");
-    }
-    var looseDir = Path.Combine(tmp, "loose_out");
-    var okLoose = PackageResolver.ExtractLoose(looseZip, looseDir, out var e2);
-    Check("松散解压成功", okLoose, e2);
-    Check("松散文件已解出", File.Exists(Path.Combine(looseDir, "textures", "foo.tex")));
-    Check("松散解压会跳过内层包（它走 InstallMod）", !File.Exists(Path.Combine(looseDir, "implicit.pmp")));
-    Check("松散解压会跳过 __MACOSX", !Directory.Exists(Path.Combine(looseDir, "__MACOSX")));
-
-    // Zip Slip：条目试图跳出目标目录
+    // ---- 9.7 Zip Slip 防护（顺着「整体当成一个 Mod」那条路解压时）----
     var evilZip = Path.Combine(tmp, "evil.zip");
     using (var z = ZipFile.Open(evilZip, ZipArchiveMode.Create))
     {
+        WriteEntry(z, "files/a.tex", "tex");        // 让整体看起来像 Mod，从而走到解压分支
         var entry = z.CreateEntry("../evil.txt");
         using var w = new StreamWriter(entry.Open());
         w.Write("pwned");
     }
-    var evilOut = Path.Combine(tmp, "evil_out");
-    PackageResolver.ExtractLoose(evilZip, evilOut, out var e3);
-    var escaped = File.Exists(Path.Combine(tmp, "evil.txt"));
-    Console.WriteLine($"   Zip Slip 尝试：目标文件是否跑到外面 = {escaped}（提示：{(e3.Length > 0 ? e3 : "无")}）");
+    var planEvil = PackageResolver.BuildPlan(evilZip, Path.Combine(tmp, "w7"));
+    var escaped = File.Exists(Path.Combine(tmp, "evil.txt")) || File.Exists(Path.Combine(tmp, "w7", "evil.txt"));
+    Console.WriteLine($"   Zip Slip 尝试：跑到外面了吗 = {escaped}（计划：{planEvil.Summary}）");
     Check("Zip Slip 被挡住（没有文件逃出目标目录）", !escaped);
+    Check("Zip Slip 那条不影响正常内容（files/a.tex 仍在）",
+          planEvil.LooseMods.Count == 1 &&
+          File.Exists(Path.Combine(planEvil.LooseMods[0].ExtractedDir, "files", "a.tex")));
 
     Check("目录名清洗：非法字符变下划线", PackageResolver.SafeModDirName("a:b*c?.pmp", "fb") == "a_b_c_.pmp",
           PackageResolver.SafeModDirName("a:b*c?.pmp", "fb"));
