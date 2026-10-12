@@ -45,6 +45,9 @@ public sealed class BrowserChannel : IDisposable
 
     public string LastError => _lastError;
 
+    /// <summary>最近一次会话实际使用的浏览器（自检报告里要显示选了谁、profile 在哪）。</summary>
+    public BrowserCandidate? LastUsedBrowser { get; private set; }
+
     public BrowserChannel(IBrowserSettings cfg, IXmaLog log)
     {
         _cfg = cfg;
@@ -239,6 +242,7 @@ public sealed class BrowserChannel : IDisposable
         try
         {
             _session = await Session.StartAsync(candidate, _cfg, _log, timeout.Token).ConfigureAwait(false);
+            LastUsedBrowser = candidate;
             _lastError = string.Empty;
             return _session;
         }
@@ -289,7 +293,11 @@ public sealed class BrowserChannel : IDisposable
         return all.FirstOrDefault(c => File.Exists(c.Exe));
     }
 
-    private static bool ProfileHasXmaCookie(BrowserCandidate c)
+    /// <summary>
+    /// 这个 profile 里有没有 xivmodarchive 的 cookie（Cookie 库的 host_key 是明文，扫一下就知道）。
+    /// 只能判「有没有」，判不了「有没有过期」—— 真正的登录态由 LoginStateDetector 看页面得出。
+    /// </summary>
+    public static bool ProfileHasXmaCookie(BrowserCandidate c)
     {
         try
         {

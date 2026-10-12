@@ -80,11 +80,21 @@ public static class XmaParser
         }
 
         // 站点把总数写成 <code>53278 Results</code>
-        var total = Regex.Match(doc.DocumentNode.InnerText ?? "", @"([\d,]+)\s*(?:Results?|Mods?)\b",
-                                RegexOptions.IgnoreCase);
-        if (total.Success) res.TotalMods = ToInt(total.Groups[1].Value);
+        res.TotalMods = ParseTotalMods(doc.DocumentNode.InnerText ?? string.Empty);
 
         return res;
+    }
+
+    /// <summary>
+    /// 只取站点自报的总条数（页面里是 <c>&lt;code&gt;53278 Results&lt;/code&gt;</c>）。
+    /// 顺带也是判断「这条通道有没有带登录态」的抓手：
+    /// 混合模式 未登录=53281、带登录态=61787（=53281 普通 + 8506 NSFW）。
+    /// </summary>
+    public static int ParseTotalMods(string html)
+    {
+        if (string.IsNullOrEmpty(html)) return 0;
+        var total = Regex.Match(html, @"([\d,]+)\s*(?:Results?|Mods?)\b", RegexOptions.IgnoreCase);
+        return total.Success ? ToInt(total.Groups[1].Value) : 0;
     }
 
     public static ModDetail ParseDetail(string html, string modId = "", string url = "")

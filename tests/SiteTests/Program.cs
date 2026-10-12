@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using XmaBrowser.Browser;
 using XmaBrowser.Cover;
+using XmaBrowser.Diagnostics;
 using XmaBrowser.Install;
 using XmaBrowser.Site;
 using XmaBrowser.Translate;
@@ -16,6 +17,7 @@ using XmaBrowser.Translate;
 var live = args.Contains("live");
 var translateOnly = args.Contains("translate");
 var nsfwProbe = args.Contains("nsfw");
+var nsfwDiag = args.Contains("nsfwdiag");
 var pass = 0;
 var fail = 0;
 
@@ -405,6 +407,40 @@ Console.WriteLine("=== 13b. 站点 NSFW 三态 → URL 参数（实测语义）=
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 13c. 站点登录态判定（标记来自实测对比）===");
+{
+    var anonHtml = File.ReadAllText(Path.Combine("samples", "search_page1.html"));
+    var anon = LoginStateDetector.Analyze(anonHtml);
+    Console.WriteLine($"   匿名样本 → {anon.State}｜总数 {anon.TotalMods}｜卡片 {anon.CardCount}｜NSFW按钮禁用={anon.NsfwButtonDisabled}");
+    Check("匿名页面判定为「未登录」", anon.State == XmaLoginState.LoggedOut, anon.Note);
+    Check("匿名页面的 NSFW 按钮是禁用的", anon.NsfwButtonDisabled);
+    Check("匿名混合总数能解析出来", anon.TotalMods > 50000, anon.TotalMods.ToString());
+    Check("本页卡片数 = 15（只数带后随空格的 mod-card，避开 mod-card-img/overlay）", anon.CardCount == 15, anon.CardCount.ToString());
+
+    // 已登录页面的最小样本（真实页面里有账号信息，不进仓库）
+    const string loggedIn =
+        "<nav><a href=\"/logout\">Log Out</a></nav>" +
+        "<button class=\"btn ternary-toggle ternary-click ternary-nsfw ternary-off mx-1\">NSFW</button>" +
+        "<code>61787 Results</code><div class=\"mod-card\"></div>";
+    var li = LoginStateDetector.Analyze(loggedIn);
+    Check("有登出入口 → 判定为「已登录」", li.State == XmaLoginState.LoggedIn, li.Note);
+    Check("已登录页面的 NSFW 按钮不禁用", !li.NsfwButtonDisabled);
+    Check("总数解析 61787", li.TotalMods == 61787, li.TotalMods.ToString());
+
+    // 反向：禁用状态要能认出来（disabled 可能排在 class 之后）
+    const string disabledAfter =
+        "<button class=\"btn ternary-nsfw ternary-off\" type=\"button\" disabled=\"disabled\" title=\"x\">NSFW</button>";
+    Check("disabled 排在后面也能认出", LoginStateDetector.NsfwButtonDisabled(disabledAfter));
+
+    Check("挑战页被识别",
+          LoginStateDetector.Analyze("<html><title>Just a moment...</title><div id=\"cf-chl\"></div></html>").State
+          == XmaLoginState.CloudflareChallenge);
+    Check("空页面 = 未知", LoginStateDetector.Analyze("").State == XmaLoginState.Unknown);
+    Check("既无登录也无登出入口 = 未知",
+          LoginStateDetector.Analyze("<html><body>hello</body></html>").State == XmaLoginState.Unknown);
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 13. 翻译：分段逻辑（离线）===");
 {
     var para = string.Join("\n", Enumerable.Range(0, 40).Select(i => $"This is sentence number {i} of the description."));
@@ -613,11 +649,37 @@ if (nsfwProbe)
     {
         var parsed = XmaParser.ParseSearch(mixedChannelHtml, 1, mixedUrl);
         Console.WriteLine("   通道：" + string.Join(" | ", parsed.Hits.Take(6).Select(h => h.Title)));
+        var dump = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "channel_mixed.html");
+        await File.WriteAllTextAsync(dump, mixedChannelHtml);
+        Console.WriteLine("   通道 HTML 已存：" + dump);
     }
     else
     {
         Console.WriteLine("   通道失败：" + probeChannel.LastError);
     }
+
+    // 顺便存一份直连的，供对比登录态标记
+    try
+    {
+        var htmlPath = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "direct_mixed.html");
+        var directHtml = await probeHttp.GetStringAsync(mixedUrl);
+        await File.WriteAllTextAsync(htmlPath, directHtml);
+        Console.WriteLine("   直连 HTML 已存：" + htmlPath);
+    }
+    catch (Exception e)
+    {
+        Console.WriteLine("   直连取页面失败：" + e.Message);
+    }
+}
+
+if (nsfwDiag)
+{
+    Console.WriteLine();
+    Console.WriteLine("=== 14. 实跑 NSFW 通道自检（插件里那个按钮走的同一条代码）===");
+    var diagSettings = new TestSettings();
+    using var diagChannel = new BrowserChannel(diagSettings, new NullLog());
+    var diagReport = await NsfwDiagnostics.RunAsync(diagChannel, diagSettings, CancellationToken.None);
+    Console.WriteLine(diagReport);
 }
 
 Console.WriteLine();

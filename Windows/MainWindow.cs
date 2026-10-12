@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using XmaBrowser.Browser;
+using XmaBrowser.Diagnostics;
 using XmaBrowser.Install;
 using XmaBrowser.Site;
 using XmaBrowser.Translate;
@@ -47,6 +48,10 @@ public class MainWindow : Window
 
     /// <summary>NSFW 模式走通道时，通道不可用的退回提示（显示在状态行下面）。</summary>
     private string _nsfwChannelWarn = string.Empty;
+
+    // ---- NSFW 自检 ----
+    private string _nsfwReport = string.Empty;
+    private bool _nsfwChecking;
     private bool _busy;
     private bool _viaChannel;
     private SearchHit? _selected;
@@ -329,6 +334,35 @@ public class MainWindow : Window
             ImGui.SetTooltip("把本页的英文标题翻成中文并缓存，列表/宫格里会显示中文名。\n" +
                              $"当前后端：{_plugin.Translator.BackendName}\n" +
                              "详情描述：在右侧点「翻译标题+描述」，或开着自动翻译。");
+    }
+
+    /// <summary>NSFW 通道 / 登录态自检（关于页按钮触发）。</summary>
+    private void StartNsfwSelfCheck()
+    {
+        if (_nsfwChecking) return;
+        _nsfwChecking = true;
+        _nsfwReport = "自检中…（正在起浏览器通道并取三个模式的页面，约 10-30 秒）";
+
+        var channel = _plugin.Channel;
+        var cfg = _plugin.Configuration;
+        Task.Run(async () =>
+        {
+            try
+            {
+                _nsfwReport = await NsfwDiagnostics.RunAsync(channel, cfg, CancellationToken.None).ConfigureAwait(false);
+                foreach (var line in _nsfwReport.Split('\n'))
+                    Plugin.Log.Information("[XmaBrowser][NSFW自检] " + line.TrimEnd());
+            }
+            catch (Exception e)
+            {
+                _nsfwReport = $"自检失败：{e.GetType().Name} {e.Message}";
+                Plugin.Log.Warning("[XmaBrowser][NSFW自检] " + _nsfwReport);
+            }
+            finally
+            {
+                _nsfwChecking = false;
+            }
+        });
     }
 
     /// <summary>设置页的「测试翻译」：翻一句固定的英文并回报结果/错误（带上代理现状，好定位）。</summary>
@@ -1301,6 +1335,31 @@ public class MainWindow : Window
             ImGui.EndChild();
         }
 
+        // ---- NSFW 通道 / 站点登录态自检 ----
+        // 站点只在**登录态**下才把 NSFW 并进「混合」列表（实测 直连 53281 / 登录态 61787 = 53281+8506），
+        // 而通道是复制本机浏览器的 cookies 起的 —— 挑错浏览器就等于没登录。
+        ImGui.Spacing();
+        ImGui.TextColored(Blue, "NSFW / 站点登录态");
+        ImGui.Separator();
+        ImGui.BeginDisabled(_nsfwChecking);
+        if (ImGui.Button(_nsfwChecking ? "自检中…（要起浏览器通道，约 10-30 秒）" : "NSFW 通道自检（登录态）"))
+            StartNsfwSelfCheck();
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("查：通道借的是哪个浏览器 / profile、它有没有登录 XIVModArchive、\n" +
+                             "三态各拿到多少条 —— 用来定位「选了混合却看不到 NSFW」。");
+        if (_nsfwReport.Length > 0)
+        {
+            ImGui.SameLine();
+            if (ImGui.Button("复制##nsfw-copy"))
+                ImGui.SetClipboardText(_nsfwReport);
+            ImGui.SameLine();
+            ImGui.TextColored(Dim, "把这份发我");
+            ImGui.BeginChild("xma-nsfw-report", new Vector2(0, 170), true);
+            ImGui.TextWrapped(_nsfwReport);
+            ImGui.EndChild();
+        }
+
         // ---- 插件自己的诊断日志（主人找不到 dalamud.log，所以这里直接给）----
         var diagLog = _plugin.Jobs.DiagLog;
         ImGui.Spacing();
@@ -1451,6 +1510,16 @@ public class MainWindow : Window
                         result = XmaParser.ParseSearch(chHtml, query.Page, pageUrl);
                         _viaChannel = true;
                         _viaChannelReason = _form.NsfwMode == 2 ? "只看 NSFW（需登录态）" : "NSFW 混合（需登录态）";
+
+                        // 顺手判一下登录态：没登录就等于白走通道，直接把原因写出来（别只显示「没有结果」）
+                        var facts = LoginStateDetector.Analyze(chHtml);
+                        if (facts.State == XmaLoginState.LoggedOut)
+                            _nsfwChannelWarn = $"浏览器通道用的是「{channel.LastUsedBrowser?.Label ?? "未知"}」，" +
+                                               "但它**没有登录 XIVModArchive** → 现在拿不到 NSFW 条目。\n" +
+                                               "去「设置」把「浏览器程序 / 用户数据目录」指到已登录站点的那个浏览器（或先在那个浏览器里登录），" +
+                                               "然后在「关于」页点「NSFW 通道自检」确认。";
+                        else if (facts.State == XmaLoginState.CloudflareChallenge)
+                            _nsfwChannelWarn = "通道取到的是 Cloudflare 挑战页（不是真页面）→ 稍后重试；NSFW 可能不完整。";
                     }
                     else
                     {

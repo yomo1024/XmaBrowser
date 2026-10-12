@@ -24,6 +24,7 @@
     <Compile Include="..\..\Site\XmaModels.cs" />
     <Compile Include="..\..\Site\XmaBlock.cs" />
     <Compile Include="..\..\Site\SearchRouting.cs" />
+    <Compile Include="..\..\Site\LoginStateDetector.cs" />
     <Compile Include="..\..\Site\XmaParser.cs" />
     <Compile Include="..\..\Site\XmaClient.cs" />
     <Compile Include="..\..\Install\PackageResolver.cs" />
@@ -38,6 +39,7 @@
     <!-- 翻译器：纯 HTTP + JSON，不含 Dalamud 依赖，所以能在这里真连接口测 -->
     <Compile Include="..\..\Translate\Translator.cs" />
     <Compile Include="..\..\Translate\ProxyInfo.cs" />
+    <Compile Include="..\..\Diagnostics\NsfwDiagnostics.cs" />
   </ItemGroup>
 
   <ItemGroup>
