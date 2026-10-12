@@ -109,4 +109,45 @@ public static class GroupPath
         => BuildFolder(template, prefix, "Gear", "SomeAuthor", "123456", "My Mod") is var f && f.Length > 0
             ? $"{f}/My Mod"
             : "（不分组，装在根目录下）";
+
+    /// <summary>
+    /// `SetModPath` 的 newPath 到底该给哪种形态？
+    ///
+    /// 我们读不到 Penumbra 内部 `RenameAndMove` 的实现（`BaseFileSystem` 在外部依赖里），
+    /// 而它可能把 newPath 当成「含自身名的完整路径」，也可能只当「父文件夹」。所以不赌：
+    /// 给出几种候选，调用后用 `GetModPath` **读回真实路径**核对，挑对的那个。
+    /// </summary>
+    public static IReadOnlyList<string> CandidatePaths(string folder, string currentNodeName, string displayName)
+    {
+        var list = new List<string>();
+
+        void Add(string s)
+        {
+            if (s.Length > 0 && IsSafeRelativePath(s) && !list.Contains(s, StringComparer.OrdinalIgnoreCase))
+                list.Add(s);
+        }
+
+        // 1) 完整路径：文件夹 + 当前节点名（我们的主假设）
+        Add(BuildFullPath(folder, currentNodeName));
+        // 2) 只给文件夹（若它自己保留节点名）
+        if (!string.IsNullOrEmpty(folder)) Add(folder);
+        // 3) 文件夹 + 显示名（若它用显示名当节点名）
+        var byDisplay = SanitizeSegment(displayName);
+        if (byDisplay.Length > 0) Add(string.IsNullOrEmpty(folder) ? byDisplay : folder + "/" + byDisplay);
+
+        return list;
+    }
+
+    /// <summary>
+    /// 判断读回来的「真实路径」是否落在目标文件夹下。
+    /// 兼容相对路径与绝对路径、正反斜杠；要求目标文件夹是一个完整路径段（避免 XMA2 误判成 XMA）。
+    /// </summary>
+    public static bool PathUnderFolder(string? fullPath, string folder)
+    {
+        if (string.IsNullOrWhiteSpace(fullPath) || string.IsNullOrWhiteSpace(folder)) return false;
+
+        var p = "/" + fullPath.Replace('\\', '/').Trim('/') + "/";
+        var f = "/" + folder.Replace('\\', '/').Trim('/') + "/";
+        return p.Contains(f, StringComparison.OrdinalIgnoreCase);
+    }
 }

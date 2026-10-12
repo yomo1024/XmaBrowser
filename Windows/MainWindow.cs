@@ -681,6 +681,62 @@ public class MainWindow : Window
 
         ImGui.Spacing();
         ImGui.TextColored(Dim, "已知限制：外链 Mod（Patreon 等）没有直链，只能「在浏览器打开」；.7z/.rar 暂不支持。");
+
+        ImGui.Spacing();
+        ImGui.TextColored(Blue, "诊断：Mod 路径与分组");
+        ImGui.Separator();
+        if (ImGui.Button("读取所有 Mod 的真实路径（并写日志）"))
+        {
+            _diagMods = _plugin.Penumbra.Mods().ToList();
+            _diagLines = _plugin.Penumbra.DumpPaths();
+            foreach (var line in _diagLines)
+                Plugin.Log.Information("[XmaBrowser][诊断] " + line);
+            _diagResult = $"读到 {_diagLines.Count} 条（已写入日志）";
+            _diagIndex = 0;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("用 Penumbra 的 GetModPath 读回每个 Mod 的真实路径（含文件夹），\n" +
+                             "并写入 /xllog —— 分组没生效时看这个最直接。");
+
+        if (_diagLines.Count > 0)
+        {
+            ImGui.BeginChild("xma-diag-list", new Vector2(0, 120), true);
+            foreach (var line in _diagLines)
+                ImGui.TextWrapped(line);
+            ImGui.EndChild();
+
+            var labels = _diagMods.Select(kv => kv.Key + "  →  " + kv.Value).ToArray();
+            if (labels.Length > 0)
+            {
+                _diagIndex = Math.Clamp(_diagIndex, 0, labels.Length - 1);
+                ImGui.SetNextItemWidth(420);
+                ImGui.Combo("##xma-diag-pick", ref _diagIndex, labels, labels.Length);
+                ImGui.SameLine();
+                if (ImGui.Button("按模板归入分组"))
+                {
+                    var cfg = _plugin.Configuration;
+                    var dir = _diagMods[_diagIndex].Key;
+                    var name = _diagMods[_diagIndex].Value;
+                    // 手动归组时没有站点类型信息（只有安装时才带）→ {type} 会算成 Other
+                    var folder = GroupPath.BuildFolder(cfg.GroupTemplate, cfg.GroupPrefix, string.Empty, string.Empty,
+                                                       string.Empty, name);
+                    var (ok, msg) = _plugin.Jobs.GroupOne(dir, name, folder);
+                    _diagResult = (ok ? "✅ " : "❌ ") + msg;
+                    _diagLines = _plugin.Penumbra.DumpPaths();
+                    foreach (var line in _diagLines)
+                        Plugin.Log.Information("[XmaBrowser][诊断] " + line);
+                }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("对选中的 Mod 走一遍归组（会先读回真实路径核对）。\n" +
+                                     "注意：手动归组没有站点类型，模板里的 {type} 会是 Other。");
+            }
+        }
+
+        if (_diagResult.Length > 0)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(_diagResult.StartsWith("❌") ? Red : Dim, _diagResult);
+        }
     }
 
     // ==================================================================== 高级搜索
@@ -901,6 +957,10 @@ public class MainWindow : Window
     private bool _detailViaChannel;
     private string _detailChannelReason = string.Empty;
     private string _viaChannelReason = string.Empty;
+    private List<string> _diagLines = [];
+    private List<KeyValuePair<string, string>> _diagMods = [];
+    private int _diagIndex;
+    private string _diagResult = string.Empty;
 
     private static string Fmt(DateTime? t) => t?.ToString("yyyy-MM-dd HH:mm") ?? "-";
 

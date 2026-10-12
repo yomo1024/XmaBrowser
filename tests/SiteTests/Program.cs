@@ -346,6 +346,27 @@ Check("安全检查：绝对路径/盘符/穿越被拒",
 Check("预览文案可用", GroupPath.Describe("{prefix}/{type}", "XMA").Contains("XMA/Gear/My Mod"),
       GroupPath.Describe("{prefix}/{type}", "XMA"));
 
+Console.WriteLine();
+Console.WriteLine("=== 12. 归组：候选路径形态 + 读回校验 ===");
+var cand = GroupPath.CandidatePaths("XMA/Gear", "MyModDir", "My Mod");
+Console.WriteLine("   候选：" + string.Join("  |  ", cand));
+Check("候选 1 = 文件夹+当前目录名（主假设）", cand.Contains("XMA/Gear/MyModDir"));
+Check("候选 2 = 只给文件夹", cand.Contains("XMA/Gear"));
+Check("候选 3 = 文件夹+显示名", cand.Contains("XMA/Gear/My Mod"));
+Check("候选不含不安全路径", cand.All(GroupPath.IsSafeRelativePath));
+
+Check("读回校验：绝对路径含目标文件夹 → 通过",
+      GroupPath.PathUnderFolder(@"F:\Penumbra\Mods\XMA\Gear\MyMod", "XMA/Gear"));
+Check("读回校验：相对路径含目标文件夹 → 通过",
+      GroupPath.PathUnderFolder("XMA/Gear/MyMod", "XMA/Gear"));
+Check("读回校验：混合斜杠 → 通过",
+      GroupPath.PathUnderFolder(@"XMA\Gear\MyMod", "XMA/Gear"));
+Check("读回校验：仍在根目录 → 不通过",
+      !GroupPath.PathUnderFolder("MyModDir", "XMA/Gear"));
+Check("读回校验：只是同名前缀（XMA2）→ 不通过",
+      !GroupPath.PathUnderFolder("XMA2/Gear/MyMod", "XMA"));
+Check("读回校验：路径为空 → 不通过", !GroupPath.PathUnderFolder("", "XMA"));
+
 if (live)
 {
     var cacheDir = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "live");    Directory.CreateDirectory(cacheDir);

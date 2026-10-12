@@ -24,6 +24,7 @@ public sealed class PenumbraBridge : IDisposable, Cover.CoverContext
     private readonly InstallMod _installMod;
     private readonly AddMod _addMod;
     private readonly SetModPath _setModPath;
+    private readonly GetModPath _getModPath;
     private readonly ReloadMod _reloadMod;
     private readonly TrySetMod _trySetMod;
     private readonly TrySetModPriority _trySetModPriority;
@@ -50,6 +51,7 @@ public sealed class PenumbraBridge : IDisposable, Cover.CoverContext
         _installMod = new InstallMod(pi);
         _addMod = new AddMod(pi);
         _setModPath = new SetModPath(pi);
+        _getModPath = new GetModPath(pi);
         _reloadMod = new ReloadMod(pi);
         _trySetMod = new TrySetMod(pi);
         _trySetModPriority = new TrySetModPriority(pi);
@@ -122,6 +124,49 @@ public sealed class PenumbraBridge : IDisposable, Cover.CoverContext
     /// </summary>
     public string SetPath(string modDirectory, string modName, string newPath)
         => Call(nameof(SetPath), () => _setModPath.Invoke(modDirectory, modName, newPath).ToString());
+
+    /// <summary>
+    /// 读回 Mod 的**真实**路径（含文件夹）。用来「不猜」：改完路径必须读回来核对。
+    /// customPath/customName 分别表示路径/排序名是不是被手动设过。
+    /// </summary>
+    public (string Ec, string Path, bool CustomPath, bool CustomName) GetPath(string modDirectory, string modName)
+    {
+        var ec = "PenumbraUnavailable";
+        var path = string.Empty;
+        var customPath = false;
+        var customName = false;
+
+        RunOnFx(() =>
+        {
+            try
+            {
+                var (result, full, isPathCustom, isNameCustom) = _getModPath.Invoke(modDirectory, modName);
+                ec = result.ToString();
+                path = full ?? string.Empty;
+                customPath = isPathCustom;
+                customName = isNameCustom;
+            }
+            catch (Exception e)
+            {
+                ec = "Exception: " + e.Message;
+                _log.Debug($"[XmaBrowser] GetModPath 失败：{e.Message}");
+            }
+        });
+
+        return (ec, path, customPath, customName);
+    }
+
+    /// <summary>把当前所有 Mod 的路径读出来（诊断用：一眼看到 Penumbra 认为它们在哪）。</summary>
+    public List<string> DumpPaths()
+    {
+        var lines = new List<string>();
+        foreach (var kv in Mods())
+        {
+            var (ec, path, customPath, customName) = GetPath(kv.Key, kv.Value);
+            lines.Add($"{kv.Key}  →  {kv.Value}  | 路径={path}  | ec={ec}  | 自定义路径={customPath} 自定义名={customName}");
+        }
+        return lines;
+    }
 
     public string Reload(string modDirectory, string modName)
         => Call(nameof(Reload), () => _reloadMod.Invoke(modDirectory, modName).ToString());

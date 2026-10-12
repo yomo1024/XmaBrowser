@@ -319,6 +319,18 @@ public sealed class InstallQueue : IDisposable
         if (newDirs.Count == 0)
             _log.Warn($"装完后没等出新 mod（{job.Title}）；Penumbra 可能仍在处理");
 
+        // 兜底：没等出新目录时（重装同一个 Mod、或 Penumbra 处理较慢），按显示名把已存在的那个找回来 ——
+        // 否则归组会被整个跳过（实测：主人装了却没分组，就是这条路径断了）
+        if (newDirs.Count == 0 && (packages.Count > 0 || addedNames.Count > 0) && job.Title.Length > 0)
+        {
+            var byName = ResolveMod(job.Title, job.Title);
+            if (byName.Dir.Length > 0)
+            {
+                newDirs.Add(byName.Dir);
+                _log.Info($"按显示名兜底找到了已装好的 Mod：{byName.Dir} → {byName.Name}");
+            }
+        }
+
         // 封面兜底：包注入没成功（或包不是 zip）时，往 mod 目录补写 cover.<ext> / images/_MetaImage.<ext> / meta.json
         if (job.CoverPath.Length > 0 && (newDirs.Count > 0 || addedNames.Count > 0))
         {
@@ -405,12 +417,34 @@ public sealed class InstallQueue : IDisposable
     /// </summary>
     private void GroupInstalled(InstallJob job, string folder, List<string> dirs)
     {
+        var ok = 0;
+        var done = 0;
+        foreach (var dir in dirs)
+        {
+            var (success, message) = GroupOne(dir, job.Title, folder);
+            if (success) ok++;
+            done++;
+            _log.Info($"归组【{job.Title}】：{(success ? "成功" : "失败")} — {message}");
+        }
+
+        if (ok > 0)
+            job.Message += $"，已归入 {folder}/";
+        else if (done > 0)
+            job.Message += $"（归入 {folder}/ 失败，仍在根目录，详见日志）";
+    }
+
+    /// <summary>
+    /// 把一个 Mod 移进目标文件夹，并**读回真实路径核对**（不依赖我对 Penumbra 内部实现的猜测）。
+    /// 返回 (是否成功, 人话说明)。供安装流程与界面上的手动归组共用。
+    /// </summary>
+    public (bool Success, string Message) GroupOne(string dirOrName, string displayName, string folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder))
+            return (false, "目标文件夹为空（模板没算出路径）");
+
         var modRoot = _penumbra.ModDirectory;
         if (string.IsNullOrEmpty(modRoot))
-        {
-            _log.Warn("拿不到 Penumbra 的 mod 目录，跳过归入文件夹");
-            return;
-        }
+            return (false, "拿不到 Penumbra 的 mod 目录");
 
         try
         {
@@ -418,60 +452,36 @@ public sealed class InstallQueue : IDisposable
         }
         catch (Exception e)
         {
-            _log.Debug($"预建目标文件夹失败（继续尝试移动）：{e.Message}");
+            _log.Debug($"预建目标文件夹失败（继续尝试）：{e.Message}");
         }
 
-        var moved = 0;
-        var failed = 0;
-        foreach (var dir in dirs)
-        {
-            var (curDir, curName) = ResolveMod(dir, job.Title);
-            var target = GroupPath.BuildFullPath(folder, curDir);
-            if (target.Length == 0 || !GroupPath.IsSafeRelativePath(target))
-            {
-                _log.Warn($"分组路径不安全，跳过：{target}");
-                failed++;
-                continue;
-            }
-            if (string.Equals(curDir.Replace('\\', '/'), target, StringComparison.OrdinalIgnoreCase))
-            {
-                moved++;                                  // 已经在该位置（比如上次装过）
-                continue;
-            }
+        var (curDir, curName) = ResolveMod(dirOrName, displayName);
 
-            var result = _penumbra.SetPath(curDir, curName, target);
-            if (result == "Success")
+        // 已经在目标文件夹里了？
+        var before = _penumbra.GetPath(curDir, curName);
+        if (GroupPath.PathUnderFolder(before.Path, folder))
+            return (true, $"已经在 {folder}/（{before.Path}）");
+
+        var last = "没有可尝试的路径形态";
+        foreach (var candidate in GroupPath.CandidatePaths(folder, curDir, displayName))
+        {
+            var result = _penumbra.SetPath(curDir, curName, candidate);
+            if (result != "Success")
             {
-                moved++;
+                last = $"SetModPath(\"{candidate}\") → {result}";
                 continue;
             }
 
-            // 可能被 Penumbra 自己的「默认导入文件夹」刚挪走 → 按名字重新定位再试一次
-            var (dir2, name2) = ResolveMod(curName, job.Title);
-            if (!string.Equals(dir2, curDir, StringComparison.OrdinalIgnoreCase))
-            {
-                var retry = _penumbra.SetPath(dir2, name2, target);
-                if (retry == "Success")
-                {
-                    moved++;
-                    continue;
-                }
-                result = retry;
-            }
+            // 读回验证（移动后节点名可能变了 → 按显示名重新定位）
+            var (dir2, name2) = ResolveMod(curName, displayName);
+            var after = _penumbra.GetPath(dir2, name2);
+            if (GroupPath.PathUnderFolder(after.Path, folder))
+                return (true, $"已归入 {folder}/（{after.Path}）");
 
-            failed++;
-            _log.Warn($"归入文件夹失败（{curDir} → {target}）：{result}");
+            last = $"SetModPath(\"{candidate}\") 返回 Success，但读回路径仍是 {after.Path}";
         }
 
-        if (moved > 0)
-        {
-            job.Message += $"，已归入 {folder}/";
-            _log.Info($"已把 {moved} 个 Mod 归入 {folder}/（失败 {failed}）");
-        }
-        else if (failed > 0)
-        {
-            job.Message += $"（归入 {folder}/ 失败，仍在根目录）";
-        }
+        return (false, last);
     }
 
     /// <summary>在 Penumbra 的 mod 列表里定位一个 Mod：先按目录名，再按路径尾段，最后按显示名。</summary>
