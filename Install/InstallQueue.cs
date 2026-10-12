@@ -717,13 +717,44 @@ public sealed class InstallQueue : IDisposable
     public string RunPathWriteExperiment(string dirOrName, string displayName)
     {
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine("=== 深入自检：路径写法实验 ===");
+        sb.AppendLine("=== 深入自检：IPC 真伪探针 + 路径写法实验 ===");
         sb.AppendLine($"Penumbra API {_penumbra.ApiMajor}.{_penumbra.ApiMinor} | mod 根={_penumbra.ModDirectory}");
         sb.AppendLine($"目标 Mod：{displayName}");
+        sb.AppendLine();
+
+        // ---------- 探针：官方实现的第一步参数校验是已知的，用非法参数就能判定「背后是不是官方实现」----------
+        // 官方 ModsApi.SetModPath：newPath 为空 → InvalidArgument；找不到 Mod → ModMissing。
+        // 若这两个非法调用都回 Success，就说明这条标签后面不是官方实现（没注册 / 被换成空壳）。
+        sb.AppendLine("【探针 1】空路径：官方必须回 InvalidArgument");
+        var probe1 = _penumbra.SetPath("__xma_probe_no_such_dir__", "__xma_probe_no_such_name__", string.Empty);
+        sb.AppendLine($"    SetModPath(不存在的Mod, 空路径) → {probe1}");
+        sb.AppendLine($"    判定：{(probe1 == "InvalidArgument" ? "像官方实现" : "**不是官方实现**（官方这里必回 InvalidArgument）")}");
+
+        sb.AppendLine();
+        sb.AppendLine("【探针 2】不存在的 Mod：官方必须回 ModMissing");
+        var probe2 = _penumbra.SetPath("__xma_probe_no_such_dir__", "__xma_probe_no_such_name__", "XMA/Gear");
+        sb.AppendLine($"    SetModPath(不存在的Mod, XMA/Gear) → {probe2}");
+        sb.AppendLine($"    判定：{(probe2 == "ModMissing" ? "像官方实现" : "**不是官方实现**（官方这里必回 ModMissing）")}");
+
+        sb.AppendLine();
+        sb.AppendLine("【对照】ReloadMod 打同一个不存在的 Mod：官方必须回 ModMissing（用来区分「只有 SetModPath 坏」还是「整条 IPC 都坏」）");
+        var probe3 = _penumbra.Reload("__xma_probe_no_such_dir__", "__xma_probe_no_such_name__");
+        sb.AppendLine($"    ReloadMod(不存在的Mod) → {probe3}");
+        sb.AppendLine($"    判定：{(probe3 == "ModMissing" ? "ReloadMod 是官方实现（说明 IPC 通道整体正常）" : "ReloadMod 也不是官方实现")}");
+
+        var setPathFake = probe1 != "InvalidArgument" || probe2 != "ModMissing";
+        sb.AppendLine();
+        sb.AppendLine(setPathFake
+            ? "结论：SetModPath 这条标签后面**不是官方实现** → 本机版本无法通过 IPC 改路径。"
+            : "结论：SetModPath 像官方实现（那问题就在别处，需要继续查）。");
+        sb.AppendLine();
+
+        if (setPathFake)
+            FlagSetModPathNoOp($"探针判定非官方实现（空路径回 {probe1}，不存在的 Mod 回 {probe2}）");
 
         if (!TryResolveMod(dirOrName, displayName, out var dir, out var name))
         {
-            sb.AppendLine("列表里找不到这条 Mod，实验中止。");
+            sb.AppendLine("列表里找不到这条 Mod，路径写法实验跳过。");
             return sb.ToString();
         }
 
