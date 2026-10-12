@@ -44,6 +44,9 @@ public class MainWindow : Window
     private const int SitePageSize = 15;
     private string _status = "留空关键词直接搜 = 看最新发布";
     private string _error = string.Empty;
+
+    /// <summary>NSFW 模式走通道时，通道不可用的退回提示（显示在状态行下面）。</summary>
+    private string _nsfwChannelWarn = string.Empty;
     private bool _busy;
     private bool _viaChannel;
     private SearchHit? _selected;
@@ -158,6 +161,9 @@ public class MainWindow : Window
         else
             ImGui.TextColored(_busy ? Yellow : Green, _status);
 
+        if (_nsfwChannelWarn.Length > 0)
+            ImGui.TextColored(Yellow, "⚠ " + _nsfwChannelWarn);
+
         var active = _form.ActiveConditions().ToList();
         if (active.Count > 0)
         {
@@ -218,11 +224,13 @@ public class MainWindow : Window
         ImGui.SameLine();
         DrawNsfwCombo("##nsfw-main");
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("站点是**三态**（实测）：\n" +
+            ImGui.SetTooltip("站点是三态的（实测）：\n" +
                              "· 排除 NSFW ＝ 发 nsfw=false\n" +
-                             "· 含 NSFW（混合）＝ 不传 nsfw 参数（NSFW 与普通内容都返回）\n" +
+                             "· 含 NSFW（混合）＝ 不传 nsfw 参数\n" +
                              "· 只看 NSFW ＝ 发 nsfw=true\n" +
-                             "看/下载 NSFW 需要站点登录态，会走浏览器通道（借用本机浏览器的登录）。");
+                             "⚠ 后两种**必须带站点登录态**才有效：实测同一 URL「混合」——直连(未登录) 53281 条、\n" +
+                             "浏览器通道(登录) 61787 条（= 53281 + 8506 条 NSFW）。\n" +
+                             "所以选这两种时会自动走「浏览器通道」（借本机浏览器的站点登录），首次会慢一点。");
 
         ImGui.SameLine();
         ImGui.Checkbox("把关键词当标签搜", ref _form.KeywordAsTag);
@@ -1426,20 +1434,49 @@ public class MainWindow : Window
             try
             {
                 SearchResult result;
-                try
-                {
-                    result = await client.SearchAsync(query, ct).ConfigureAwait(false);
-                }
-                catch (XmaAccessException directDenied) when (channel.Enabled && cfg.AutoFallbackToBrowser)
-                {
-                    // 直连被拒（Cloudflare 挑战 / 需要登录态）→ 交给浏览器通道重试一次
-                    var html = await channel.GetHtmlAsync(XmaUrls.Search(query), ct).ConfigureAwait(false);
-                    if (html is null || html.Length == 0)
-                        throw new InvalidOperationException(directDenied.Message + "；浏览器通道也没取到：" + channel.LastError);
+                var pageUrl = XmaUrls.Search(query);
 
-                    result = XmaParser.ParseSearch(html, query.Page, XmaUrls.Search(query));
-                    _viaChannel = true;
-                    _viaChannelReason = XmaBlockClassifier.ShortLabel(directDenied.Reason);
+                // NSFW 模式必须优先走浏览器通道（带站点登录态）：
+                // 实测同一 URL「混合（不传 nsfw 参数）」——直连（未登录）总数 53281（纯普通内容），
+                // 带登录态的浏览器通道总数 61787 = 53281 + 8506（普通 + 全是 NSFW）。
+                // 也就是说**站点只在登录态下才把 NSFW 并进列表**；直连再多试也没用。
+                var channelFirst = SearchRouting.MustUseBrowserChannel(_form.NsfwMode, channel.Enabled, cfg.AutoFallbackToBrowser);
+                _nsfwChannelWarn = string.Empty;
+
+                if (channelFirst)
+                {
+                    var chHtml = await channel.GetHtmlAsync(pageUrl, ct).ConfigureAwait(false);
+                    if (chHtml is { Length: > 0 })
+                    {
+                        result = XmaParser.ParseSearch(chHtml, query.Page, pageUrl);
+                        _viaChannel = true;
+                        _viaChannelReason = _form.NsfwMode == 2 ? "只看 NSFW（需登录态）" : "NSFW 混合（需登录态）";
+                    }
+                    else
+                    {
+                        // 通道不可用就别卡住：退回直连（普通内容照常看，NSFW 会缺）
+                        result = await client.SearchAsync(query, ct).ConfigureAwait(false);
+                        _nsfwChannelWarn = "浏览器通道取不到页面（" + channel.LastError + "），已退回直连 —— NSFW 条目不会显示；" +
+                                           "检查设置里的浏览器通道 / 浏览器是否已登录站点。";
+                    }
+                }
+                else
+                {
+                    try
+                    {
+                        result = await client.SearchAsync(query, ct).ConfigureAwait(false);
+                    }
+                    catch (XmaAccessException directDenied) when (channel.Enabled && cfg.AutoFallbackToBrowser)
+                    {
+                        // 直连被拒（Cloudflare 挑战 / 需要登录态）→ 交给浏览器通道重试一次
+                        var html = await channel.GetHtmlAsync(pageUrl, ct).ConfigureAwait(false);
+                        if (html is null || html.Length == 0)
+                            throw new InvalidOperationException(directDenied.Message + "；浏览器通道也没取到：" + channel.LastError);
+
+                        result = XmaParser.ParseSearch(html, query.Page, pageUrl);
+                        _viaChannel = true;
+                        _viaChannelReason = XmaBlockClassifier.ShortLabel(directDenied.Reason);
+                    }
                 }
 
                 _hits = result.Hits;
@@ -1498,6 +1535,32 @@ public class MainWindow : Window
 
         Task.Run(async () =>
         {
+            // NSFW 模式下详情也优先走通道：站点只在登录态下才给 NSFW 的下载直链，
+            // 直连拿到的可能是「登录后可见」的空壳页（不报错，但没链接）。
+            var channelFirst = SearchRouting.MustUseBrowserChannel(_form.NsfwMode, channel.Enabled, cfg.AutoFallbackToBrowser);
+            if (channelFirst)
+            {
+                try
+                {
+                    var html = await channel.GetHtmlAsync(pageUrl).ConfigureAwait(false);
+                    if (html is { Length: > 0 })
+                    {
+                        var parsed = XmaParser.ParseDetail(html, modId, pageUrl);
+                        if (parsed.Title.Length > 0 || parsed.DownloadHref.Length > 0)
+                        {
+                            _detail = parsed;
+                            _detailViaChannel = true;
+                            _detailChannelReason = "NSFW 模式（需登录态）";
+                            return;
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    Plugin.Log.Warning($"[XmaBrowser] 浏览器通道读详情失败，改走直连：{e.Message}");
+                }
+            }
+
             try
             {
                 _detail = await client.DetailAsync(modId).ConfigureAwait(false);

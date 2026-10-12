@@ -394,6 +394,14 @@ Console.WriteLine("=== 13b. 站点 NSFW 三态 → URL 参数（实测语义）=
     Check("只看 NSFW → 发 nsfw=true", q2.Contains("nsfw=true"));
     Check("三态互不相同（不会又把「显示」当成「只看」）", q0 != q1 && q1 != q2 && q0 != q2);
     Check("越界值按排除处理", XmaUrls.Search(new SearchQuery { NsfwMode = 99 }).Contains("nsfw=false"));
+
+    // 通道选择：NSFW 模式必须带登录态去取，否则直连只会拿到纯普通内容
+    // （实测「混合」：直连 53281 条 vs 带登录态通道 61787 条 = 53281 + 8506）
+    Check("排除模式 → 直连即可", !SearchRouting.MustUseBrowserChannel(0, true, true));
+    Check("混合模式 → 必须走浏览器通道", SearchRouting.MustUseBrowserChannel(1, true, true));
+    Check("只看 NSFW → 必须走浏览器通道", SearchRouting.MustUseBrowserChannel(2, true, true));
+    Check("通道关掉时不强求（退回直连）", !SearchRouting.MustUseBrowserChannel(1, false, true));
+    Check("自动回退关掉时不强求", !SearchRouting.MustUseBrowserChannel(1, true, false));
 }
 
 Console.WriteLine();
@@ -535,42 +543,80 @@ if (live || translateOnly)
 
 if (nsfwProbe)
 {
-    // 用插件的浏览器通道（借用本机浏览器的登录态）实测 nsfw 参数的三种取值到底显示什么。
-    // 未登录时只能测出「true = 只看 NSFW；其他 = 排除 NSFW」，混合态必须带登录态测。
+    // 关键：插件搜索走**直连**（未登录），而 NSFW 内容可能需要**登录态**才出现在列表里。
+    // 这里把两条路并排量出来，别再用其中一条的结论去代表另一条。
     Console.WriteLine();
-    Console.WriteLine("=== NSFW 参数语义（带登录态，走浏览器通道）===");
+    Console.WriteLine("=== NSFW 三态：直连（未登录）vs 浏览器通道（带登录态） ===");
     var probeSettings = new TestSettings();
+    var probeCache = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "nsfw");
+    Directory.CreateDirectory(probeCache);
+    using var probeHttp = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+    using var probeClient = new XmaClient(probeHttp, probeSettings, probeCache, new NullLog());
     using var probeChannel = new BrowserChannel(probeSettings, new NullLog());
 
-    const string nsfwMod = "Floor Forced Doggy";
-    const string sfwMod = "Pictish Tattoos";
-    var cases = new (string Label, string Param)[]
+    var cases = new (string Label, int Mode, string? Param)[]
     {
-        ("不传 nsfw（默认）", null!),
-        ("nsfw=false      ", "false"),
-        ("nsfw=空          ", ""),
-        ("nsfw=true（只看 NSFW）", "true"),
+        ("排除 NSFW", 0, "false"),
+        ("混合（不传参数）", 1, null),
+        ("只看 NSFW", 2, "true"),
     };
 
-    foreach (var (label, param) in cases)
+    foreach (var (label, mode, param) in cases)
     {
-        foreach (var (name, kind) in new[] { (nsfwMod, "NSFW"), (sfwMod, "SFW ") })
+        // 直连：走插件真实路径（XmaClient + NsfwMode）
+        string directText;
+        try
         {
-            var q = param is null
-                ? $"https://www.xivmodarchive.com/search?sortby=&sortorder=&dt_compat=1&name={Uri.EscapeDataString(name)}"
-                : $"https://www.xivmodarchive.com/search?nsfw={param}&sortby=&sortorder=&dt_compat=1&name={Uri.EscapeDataString(name)}";
-            var html = await probeChannel.GetHtmlAsync(q, CancellationToken.None);
-            if (html is null || html.Length == 0)
-            {
-                Console.WriteLine($"   {label} | {kind} 「{name}」→ 取页面失败：{probeChannel.LastError}");
-                continue;
-            }
-
-            var parsed = XmaParser.ParseSearch(html, 1, q);
-            var found = parsed.Hits.Any(h => h.Title.Contains(name.Split(' ')[0], StringComparison.OrdinalIgnoreCase));
-            Console.WriteLine($"   {label} | {kind} 「{name}」→ 站点总数 {parsed.TotalMods}，本页 {parsed.Hits.Count} 条，" +
-                              $"找得到={found}");
+            var direct = await probeClient.SearchAsync(new SearchQuery { NsfwMode = mode, Page = 1 }, CancellationToken.None);
+            var nsfwInPage = direct.Hits.Count(h => h.Title.Contains("Doggy", StringComparison.OrdinalIgnoreCase) ||
+                                                    h.Title.Contains("Loincloth", StringComparison.OrdinalIgnoreCase));
+            directText = $"总数={direct.TotalMods} 本页={direct.Hits.Count}";
         }
+        catch (Exception e)
+        {
+            directText = "失败：" + e.GetType().Name + " " + e.Message;
+        }
+
+        // 浏览器通道：带登录态
+        var channelUrl = param is null
+            ? "https://www.xivmodarchive.com/search?sortby=&sortorder=&dt_compat=1"
+            : $"https://www.xivmodarchive.com/search?nsfw={param}&sortby=&sortorder=&dt_compat=1";
+        string channelText;
+        var channelHtml = await probeChannel.GetHtmlAsync(channelUrl, CancellationToken.None);
+        if (channelHtml is null || channelHtml.Length == 0)
+            channelText = "失败：" + probeChannel.LastError;
+        else
+        {
+            var parsed = XmaParser.ParseSearch(channelHtml, 1, channelUrl);
+            channelText = $"总数={parsed.TotalMods} 本页={parsed.Hits.Count}";
+        }
+
+        Console.WriteLine($"   {label,-16} 直连[{directText}]   通道[{channelText}]");
+    }
+
+    // 混合模式下第 1 页到底有哪些标题（直连一份、通道一份，用来确认 NSFW 条目在不在）
+    Console.WriteLine();
+    Console.WriteLine("=== 混合模式第 1 页标题：直连 vs 通道（抽 6 条） ===");
+    var mixedUrl = "https://www.xivmodarchive.com/search?sortby=&sortorder=&dt_compat=1";
+    try
+    {
+        var mixedDirect = await probeClient.SearchAsync(new SearchQuery { NsfwMode = 1, Page = 1 }, CancellationToken.None);
+        Console.WriteLine("   直连：" + string.Join(" | ", mixedDirect.Hits.Take(6).Select(h => h.Title)));
+    }
+    catch (Exception e)
+    {
+        Console.WriteLine("   直连失败：" + e.Message);
+    }
+
+    var mixedChannelHtml = await probeChannel.GetHtmlAsync(mixedUrl, CancellationToken.None);
+    if (mixedChannelHtml is { Length: > 0 })
+    {
+        var parsed = XmaParser.ParseSearch(mixedChannelHtml, 1, mixedUrl);
+        Console.WriteLine("   通道：" + string.Join(" | ", parsed.Hits.Take(6).Select(h => h.Title)));
+    }
+    else
+    {
+        Console.WriteLine("   通道失败：" + probeChannel.LastError);
     }
 }
 
