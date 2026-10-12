@@ -351,11 +351,16 @@ public sealed class InstallQueue : IDisposable
         // 否则归组会被整个跳过（实测：主人装了却没分组，就是这条路径断了）
         if (newDirs.Count == 0 && (packages.Count > 0 || addedNames.Count > 0) && job.Title.Length > 0)
         {
-            var byName = ResolveMod(job.Title, job.Title);
-            if (byName.Dir.Length > 0)
+            if (TryResolveMod(job.Title, job.Title, out var foundDir, out var foundName))
             {
-                newDirs.Add(byName.Dir);
-                _log.Info($"按显示名兜底找到了已装好的 Mod：{byName.Dir} → {byName.Name}");
+                newDirs.Add(foundDir);
+                _log.Info($"按显示名兜底找到了已装好的 Mod：{foundDir} → {foundName}");
+                LogDiag($"按显示名兜底找到：{foundDir}");
+            }
+            else
+            {
+                _log.Warn($"列表里还没有这条 Mod（{job.Title}）—— Penumbra 可能仍在导入");
+                LogDiag($"列表里还没找到这条 Mod，归组推迟处理");
             }
         }
 
@@ -509,6 +514,13 @@ public sealed class InstallQueue : IDisposable
         var (curDir, curName) = ResolveMod(dirOrName, displayName);
         sb.AppendLine($"定位到：dir={curDir} | name={curName}");
 
+        if (!TryResolveMod(dirOrName, displayName, out curDir, out curName))
+        {
+            sb.AppendLine("结果：Penumbra 的 mod 列表里找不到这个 Mod（可能还在导入中，或名字对不上）");
+            sb.AppendLine($"列表快照：{_penumbra.SnapshotList()}");
+            return (false, $"列表里找不到「{displayName}」—— Penumbra 可能还在导入，稍后再试", sb.ToString());
+        }
+
         var before = _penumbra.GetPath(curDir, curName);
         sb.AppendLine($"移动前：ec={before.Ec} 路径=\"{before.Path}\" 自定义路径={before.CustomPath} 自定义名={before.CustomName}");
         sb.AppendLine($"列表快照（前）：{_penumbra.SnapshotList()}");
@@ -592,29 +604,49 @@ public sealed class InstallQueue : IDisposable
     }
 
     /// <summary>在 Penumbra 的 mod 列表里定位一个 Mod：先按目录名，再按路径尾段，最后按显示名。</summary>
-    private (string Dir, string Name) ResolveMod(string dirOrName, string title)
+    private bool TryResolveMod(string dirOrName, string displayName, out string dir, out string name)
     {
         var mods = _penumbra.Mods();
 
         if (mods.TryGetValue(dirOrName, out var byKey))
-            return (dirOrName, byKey);
+        {
+            dir = dirOrName;
+            name = byKey;
+            return true;
+        }
 
         foreach (var kv in mods)
         {
             if (kv.Key.EndsWith("/" + dirOrName, StringComparison.OrdinalIgnoreCase) ||
                 kv.Key.Equals(dirOrName, StringComparison.OrdinalIgnoreCase))
-                return (kv.Key, kv.Value);
+            {
+                dir = kv.Key;
+                name = kv.Value;
+                return true;
+            }
         }
 
-        if (title.Length > 0)
+        if (displayName.Length > 0)
         {
             foreach (var kv in mods)
-                if (kv.Value.Equals(title, StringComparison.OrdinalIgnoreCase))
-                    return (kv.Key, kv.Value);
+            {
+                if (kv.Value.Equals(displayName, StringComparison.OrdinalIgnoreCase))
+                {
+                    dir = kv.Key;
+                    name = kv.Value;
+                    return true;
+                }
+            }
         }
 
-        return (dirOrName, title);
+        dir = dirOrName;
+        name = displayName;
+        return false;
     }
+
+    /// <summary>同上的宽松版（找不到时返回传入值，调用方自己判断）。</summary>
+    private (string Dir, string Name) ResolveMod(string dirOrName, string title)
+        => TryResolveMod(dirOrName, title, out var dir, out var name) ? (dir, name) : (dirOrName, title);
 
     /// <summary>在 mod 根目录里找一个不冲突的目录名。</summary>
     private static string UniqueDirIn(string root, string safeName)
