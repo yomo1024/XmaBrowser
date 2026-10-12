@@ -551,14 +551,10 @@ public sealed class InstallQueue : IDisposable
         if (string.IsNullOrEmpty(modRoot))
             return (false, "拿不到 Penumbra 的 mod 目录", sb.ToString());
 
-        try
-        {
-            Directory.CreateDirectory(Path.Combine(modRoot, folder.Replace('/', Path.DirectorySeparatorChar)));
-        }
-        catch (Exception e)
-        {
-            _log.Debug($"预建目标文件夹失败（继续尝试）：{e.Message}");
-        }
+        // 这里曾用 Directory.CreateDirectory(modRoot/folder) 预建物理文件夹 —— v0.3.9 已删除。
+        // 原因：Penumbra 的文件夹是纯虚拟的（MoveChild 只改内存树、ScanMods 只扫 mod 根顶层），
+        // 在磁盘上建 XMA/Gear 这种空目录不但没用，还会被扫成一条空 mod、并在磁盘留下垃圾。
+        // 归组一律只走 IPC SetModPath —— 绝不碰真实文件路径。
 
         var (curDir, curName) = ResolveMod(dirOrName, displayName);
         sb.AppendLine($"定位到：dir={curDir} | name={curName}");
@@ -721,6 +717,12 @@ public sealed class InstallQueue : IDisposable
         sb.AppendLine($"Penumbra API {_penumbra.ApiMajor}.{_penumbra.ApiMinor} | mod 根={_penumbra.ModDirectory}");
         sb.AppendLine($"目标 Mod：{displayName}");
         sb.AppendLine();
+        sb.AppendLine("【本自检的作用范围】只调用 Penumbra 的 IPC（SetModPath / ReloadMod / GetModPath），");
+        sb.AppendLine("  改的是 Penumbra 列表里的「虚拟位置」（即 sort_order.json 里的 Folder/SortOrderName），");
+        sb.AppendLine("  **不移动 / 不删除 / 不新建任何真实文件或文件夹**。下面的磁盘前后快照就是证据。");
+        var diskBefore = DiskSnapshotTop();
+        sb.AppendLine($"磁盘快照（前）：{diskBefore}");
+        sb.AppendLine();
 
         // ---------- 探针：官方实现的第一步参数校验是已知的，用非法参数就能判定「背后是不是官方实现」----------
         // 官方 ModsApi.SetModPath：newPath 为空 → InvalidArgument；找不到 Mod → ModMissing。
@@ -815,7 +817,39 @@ public sealed class InstallQueue : IDisposable
 
         sb.AppendLine();
         sb.AppendLine($"结束列表：{_penumbra.SnapshotList()}");
+        var diskAfter = DiskSnapshotTop();
+        sb.AppendLine($"磁盘快照（后）：{diskAfter}");
+        sb.AppendLine(diskBefore == diskAfter
+            ? "✔ 磁盘顶层前后完全一致 —— 本次自检没有动任何真实文件路径。"
+            : "✘ 磁盘顶层发生变化，请把这份报告整份发我。");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// mod 根目录的顶层只读快照（仅列目录名，不读不写内容），用来证明自检没碰磁盘。
+    /// </summary>
+    private string DiskSnapshotTop()
+    {
+        try
+        {
+            var root = _penumbra.ModDirectory;
+            if (string.IsNullOrEmpty(root) || !Directory.Exists(root))
+                return "(拿不到 mod 根目录)";
+
+            var names = Directory.EnumerateDirectories(root)
+                                 .Select(Path.GetFileName)
+                                 .Where(n => !string.IsNullOrEmpty(n))
+                                 .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                                 .Take(3000)
+                                 .ToList();
+
+            var head = string.Join(", ", names.Take(15));
+            return $"顶层目录 {names.Count} 个｜{head}{(names.Count > 15 ? " …" : string.Empty)}";
+        }
+        catch (Exception e)
+        {
+            return "(枚举失败：" + e.Message + ")";
+        }
     }
 
     /// <summary>在 mod 根目录里找一个不冲突的目录名。</summary>
