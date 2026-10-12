@@ -116,32 +116,31 @@ def main() -> int:
         })
         return e
 
-    # 主源用 jsdelivr：本机实测 raw.githubusercontent 会被线路重置（Recv failure: Connection was reset），
-    # 而 jsdelivr 稳定；它唯一的坑是「新建仓库的新路径会先返回负缓存 404」—— 见文件末尾的 purge，
-    # 每次发布都主动刷一次，这个坑就没了。raw 版清单作为备用源。
+    # 主源 = raw.githubusercontent（主人明确指定用它），清单里的下载链接也用 raw —— 与源保持同一主机，
+    # 免得出现「清单取得到、包却下不动」这种半通状态。
+    # jsdelivr 版清单保留为 pluginmaster-cdn.json（备用文件），不推荐也不删除，
+    # 免得早先把它当源加进去的人失效。
     for fname, link, host in (
-        ("pluginmaster.json",     cdn_url, "jsdelivr（主，发布后自动 purge）"),
-        ("pluginmaster-cdn.json", cdn_url, "jsdelivr（同一份，兼容早先发出去的地址）"),
-        ("pluginmaster-raw.json", raw_url, "raw.githubusercontent（备用源）"),
+        ("pluginmaster.json",     raw_url, "raw.githubusercontent（主）"),
+        ("pluginmaster-raw.json", raw_url, "同一份的别名（早期地址兼容）"),
+        ("pluginmaster-cdn.json", cdn_url, "jsdelivr（备用文件，不推荐）"),
         ("pluginmaster-gh.json",  gh_url,  "GitHub Release 附件（以后发 Release 用）"),
     ):
         with open(os.path.join(ROOT, fname), "w", encoding="utf-8") as f:
             json.dump([manifest_for(link)], f, ensure_ascii=False, indent=2)
             f.write("\n")
 
-    # 发布后自动刷新 jsdelivr 缓存（否则新路径可能 404 或仍给旧版；实测踩过）
-    purge_jsdelivr(["/pluginmaster.json", "/dist/" + zip_name])
+    # 顺手刷一下 jsdelivr 备用文件（主人不用它当源，但保持新鲜没坏处）
+    purge_jsdelivr(["/pluginmaster-cdn.json", "/dist/" + zip_name])
 
     size_mb = os.path.getsize(zip_path) / 1048576.0
     print("插件：%s v%s（API %s）" % (manifest["Name"], ver3, manifest["DalamudApiLevel"]))
     print("zip ：%s  （%.2f MB，来自 %s）" % (zip_name, size_mb, source))
-    print("清单：pluginmaster.json（主）/ pluginmaster-raw.json（备）/ pluginmaster-gh.json（Release）")
-    print("Dalamud 自定义插件源 —— 主地址（粘这个）：")
-    print("   https://cdn.jsdelivr.net/gh/%s@%s/pluginmaster.json" % (REPO, BRANCH))
-    print("主地址不通时用备用（下载走 raw）：")
-    print("   https://cdn.jsdelivr.net/gh/%s@%s/pluginmaster-raw.json" % (REPO, BRANCH))
-    print("若 raw 也不通，可换回直连 raw 的清单：")
-    print("   https://raw.githubusercontent.com/%s/%s/pluginmaster-raw.json" % (REPO, BRANCH))
+    print("清单：pluginmaster.json（主，raw）/ pluginmaster-gh.json（Release）/ pluginmaster-cdn.json（备用）")
+    print("Dalamud 自定义插件源 —— 粘这个：")
+    print("   https://raw.githubusercontent.com/%s/%s/pluginmaster.json" % (REPO, BRANCH))
+    print("如果列表里看不到插件，先用那台机器的浏览器打开上面这个地址：")
+    print("   能看到 JSON 文本 = 网络没问题（等 raw 缓存约 5 分钟后重试）；打不开 = 改用本地安装")
 
     # 自检：zip 里必须能读到清单，且 InternalName/版本对得上
     with zipfile.ZipFile(zip_path) as z:
