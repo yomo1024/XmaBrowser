@@ -396,9 +396,20 @@ Console.WriteLine("=== 13. 翻译：分段逻辑（离线）===");
     Check("分段：空文本不产生块", !Translator.Split("", 200).Any());
 
     using var trHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-    using var emptyTranslator = new Translator(trHttp, new TestTranslateSettings(), Path.GetTempPath());
+    using var emptyTranslator = new Translator(new TestTranslateSettings(), Path.GetTempPath(), null, trHttp);
     Check("未翻译过的文本读缓存 = null", emptyTranslator.Cached("some text never translated") is null);
     Check("标题显示回退到原文", emptyTranslator.DisplayTitle("My Mod") == "My Mod");
+
+    // 谷歌返回的解析：样本是实测抓下来的真实返回（单段 / 多段）
+    var g1 = Translator.ReadGoogleTranslation("[[[\"你好\",\"hi\",null,null,10]],null,\"en\",null,null,null,null,[]]");
+    Check("谷歌解析：单段", g1 == "你好", g1);
+
+    var g2 = Translator.ReadGoogleTranslation(
+        "[[[\"第一段。\\n\",\"P1\\n\",null,null,3],[\"第二行。\\n\\n\",\"P2\\n\\n\",null,null,3],[\"第三段。\",\"P3\",null,null,3]]," +
+        "null,\"en\",null,null,null,null,[]]");
+    Check("谷歌解析：多段按序拼接且保留换行", g2 == "第一段。\n第二行。\n\n第三段。", g2.Replace("\n", "\\n"));
+
+    Check("谷歌解析：坏输入不抛异常", Translator.ReadGoogleTranslation("not json at all") == "");
 }
 
 if (live)
@@ -468,8 +479,7 @@ if (live || translateOnly)
 
     Console.WriteLine();
     Console.WriteLine("=== 13. 联网实测：翻译后端真实调用 ===");
-    using (var trHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(40) })
-    using (var translator = new Translator(trHttp, trSettings, trCache))
+    using (var translator = new Translator(trSettings, trCache))
     {
         Console.WriteLine($"   后端：{translator.BackendName}");
         const string probeText = "Mimic Chest Replacement - a cute treasure chest retexture for glamour lovers";
@@ -517,10 +527,11 @@ static string Normalize(string s) => new(s.Where(c => !char.IsWhiteSpace(c)).ToA
 
 internal sealed class TestTranslateSettings : ITranslateSettings
 {
-    public string TranslateBackend => "youdao";
+    public string TranslateBackend => "google";
     public string TranslateBaseUrl => "https://api.deepseek.com/v1";
     public string TranslateApiKey => string.Empty;
     public string TranslateModel => "deepseek-chat";
+    public string TranslateProxy => string.Empty;
 }
 
 internal sealed class TestSettings : IXmaSettings, IBrowserSettings

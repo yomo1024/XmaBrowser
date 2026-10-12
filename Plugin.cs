@@ -70,7 +70,7 @@ public sealed class Plugin : IDalamudPlugin
                                 Path.Combine(cacheDir, "temp"),
                                 msg => ChatGui.Print(msg));
         CoverDrawer = new PenumbraCoverDrawer(PluginInterface, Configuration, Penumbra, TextureProvider, Log);
-        Translator = new Translator(_http, Configuration, Path.Combine(PluginInterface.ConfigDirectory.FullName, "translate"),
+        Translator = new Translator(Configuration, Path.Combine(PluginInterface.ConfigDirectory.FullName, "translate"),
                                     msg => Log.Debug("[XmaBrowser] " + msg));
         CoverInjector.CleanupOld();     // 清掉上次注入留在 %TEMP% 的包
 

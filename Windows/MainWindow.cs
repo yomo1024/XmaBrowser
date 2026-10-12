@@ -888,12 +888,19 @@ public class MainWindow : Window
         ImGui.TextColored(Blue, "翻译（英文 Mod 标题/描述 → 中文）");
         ImGui.Separator();
 
-        var backends = new[] { "有道公共接口（免 Key，默认）", "腾讯交互翻译（免 Key，更优但可能证书不通）", "OpenAI 兼容（DeepSeek 等，需 Key）" };
-        var currentBackend = (_plugin.Configuration.TranslateBackend ?? "youdao").Trim().ToLowerInvariant();
+        var backends = new[]
+        {
+            "谷歌翻译（免 Key，默认）",
+            "有道公共接口（免 Key）",
+            "腾讯交互翻译（免 Key）",
+            "OpenAI 兼容（DeepSeek 等，需 Key）",
+        };
+        var currentBackend = (_plugin.Configuration.TranslateBackend ?? "google").Trim().ToLowerInvariant();
         var backendIdx = currentBackend switch
         {
-            "tencent" => 1,
-            "openai" => 2,
+            "youdao" => 1,
+            "tencent" => 2,
+            "openai" => 3,
             _ => 0,
         };
         ImGui.SetNextItemWidth(340);
@@ -901,14 +908,29 @@ public class MainWindow : Window
         {
             cfg.TranslateBackend = backendIdx switch
             {
-                1 => "tencent",
-                2 => "openai",
-                _ => "youdao",
+                1 => "youdao",
+                2 => "tencent",
+                3 => "openai",
+                _ => "google",
             };
             changed = true;
         }
 
-        if (backendIdx == 2)
+        ImGui.TextUnformatted("代理　");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(340);
+        var proxy = cfg.TranslateProxy;
+        if (ImGui.InputTextWithHint("##tr-proxy", "留空 = 用系统代理（谷歌必需；如 http://127.0.0.1:7877）",
+                                    ref proxy, 200))
+        {
+            cfg.TranslateProxy = proxy;
+            changed = true;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("插件跑在 .NET 里，**默认就走 Windows 系统代理** —— 系统代理开着的话这里留空即可。\n" +
+                             "只有本机没系统代理、但你自己有本地代理客户端时，才需要手填（如 http://127.0.0.1:7890）。");
+
+        if (backendIdx == 3)
         {
             ImGui.TextUnformatted("BaseUrl");
             ImGui.SameLine();

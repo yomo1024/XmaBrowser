@@ -52,12 +52,19 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
 
     /// <summary>
     /// 翻译后端：
-    /// <c>youdao</c> = 有道公共接口（免 Key，**默认**；用 .NET 栈实测可用，但限流很紧：约 1 次/2 秒）；
-    /// <c>tencent</c> = 腾讯交互翻译（免 Key，质量与速度都更好，但**部分机器上证书链在 Windows 下验证不通过**，
-    ///             实测本机报 SSL 错误；报错就换后端）；
+    /// <c>google</c> = 谷歌免费端点（免 Key，**默认**，质量最好、实测不限流；需要能访问谷歌 ——
+    ///             .NET 默认走 Windows 系统代理，所以挂着代理的机器直接可用）；
+    /// <c>youdao</c> = 有道公共接口（免 Key，国内直连可用，但限流很紧：约 1 次/2 秒）；
+    /// <c>tencent</c> = 腾讯交互翻译（免 Key，好使但部分机器证书链在 Windows 下验证不过）；
     /// <c>openai</c> = 任意 OpenAI 兼容接口（DeepSeek 等，质量最好最快，需要填 Key）。
     /// </summary>
-    public string TranslateBackend { get; set; } = "youdao";
+    public string TranslateBackend { get; set; } = "google";
+
+    /// <summary>
+    /// 翻译请求用的代理，形如 http://127.0.0.1:7877。**留空 = 用 Windows 系统代理**（.NET 默认行为）。
+    /// 谷歌需要走到境外，本机没系统代理时才需要在这里手填。
+    /// </summary>
+    public string TranslateProxy { get; set; } = string.Empty;
 
     /// <summary>OpenAI 兼容接口的 BaseUrl（默认 DeepSeek）。</summary>
     public string TranslateBaseUrl { get; set; } = "https://api.deepseek.com/v1";

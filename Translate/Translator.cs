@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text;
@@ -21,31 +22,36 @@ public interface ITranslateSettings
     string TranslateBaseUrl { get; }
     string TranslateApiKey { get; }
     string TranslateModel { get; }
+
+    /// <summary>翻译请求用的代理（形如 http://127.0.0.1:7877）。留空 = 用 .NET 默认（= Windows 系统代理）。</summary>
+    string TranslateProxy { get; }
 }
 
 /// <summary>
-/// 英文 → 中文翻译（用于 Mod 标题与描述）。三个后端，都实测过（**注意：要用 .NET 栈测，curl 的结论不可信**）：
+/// 英文 → 中文翻译（用于 Mod 标题与描述）。四个后端，**都必须用 .NET 栈测**（PowerShell 即可），
+/// 因为插件跑在 .NET 里、而 .NET **默认走 Windows 系统代理**、curl 不走 —— 两边结论会完全相反：
 ///
-///   · <c>youdao</c>（**默认**）：有道公共接口 <c>https://aidemo.youdao.com/trans</c>，免 Key。
-///     实测（.NET 走通）：单次能吃 593 字符；但**限流很紧（约 1 次/2 秒，且会进入惩罚期）**，
-///     所以长文分段时要老实等够间隔，段落多时会比较慢。
-///   · <c>tencent</c>：腾讯交互翻译 <c>https://transmart.qq.com/api/imt</c>，免 Key，质量与速度都更好
-///     （curl 实测：一次 6000 字符、连打 8 次不限流、保留换行）。
-///     ⚠ 但它**只发到中间证书**（DigiCert Secure Site OV G2 ... 2022 CA1），本机 Windows/SChannel
-///     报「远程证书无效」，而 curl（Mozilla CA 包）能过 —— 即**同一接口在两套信任库下结论相反**。
-///     换机器可能就好使，所以留着：报 SSL 错误就切回有道或用 openai。
+///   · <c>google</c>（**默认**）：谷歌免费端点 <c>translate.googleapis.com/translate_a/single</c>，免 Key。
+///     实测（.NET，本机挂着系统代理 127.0.0.1:7877）：连打 10 次不限流；单次吃 5000 字符（URL 6.7k）；
+///     0.3–1.5 秒返回；**多段返回且保留换行**；中文质量最好。curl 测同一个 URL 是超时（不走代理）。
+///     注意：没代理时谷歌在境内连不上 → 要么在设置里填代理，要么换下面的国内后端。
+///   · <c>youdao</c>：有道公共接口 <c>https://aidemo.youdao.com/trans</c>，免 Key，.NET 走通。
+///     单次 ≤600 字符；**限流很紧（约 1 次/2 秒，会进惩罚期）**。
+///   · <c>tencent</c>：腾讯交互翻译 <c>https://transmart.qq.com/api/imt</c>，免 Key，质量与速度都好
+///     （curl 实测 6000 字符/次、不限流、保留换行），但**只发到中间证书**，本机 .NET 报「远程证书无效」。
 ///   · <c>openai</c>：任意 OpenAI 兼容接口（DeepSeek / 本地 vLLM 等），质量最好最快，需要 Key。
-///     （实测 api.deepseek.com 的 TLS 正常。）
 ///
-/// 另外实测**不通**、别再用：translate.googleapis.com（超时）、api.mymemory.translated.net（超时）、
-/// lingva.ml（空响应）、api-edge.cognitive.microsofttranslator.com（空响应）、
-/// cn.bing.com/ttranslatev3（statusCode 205，token/key 流程走不通）、
+/// 另外实测**不通**、别再用：api.mymemory.translated.net（超时）、lingva.ml（空响应）、
+/// api-edge.cognitive.microsofttranslator.com（空响应）、cn.bing.com/ttranslatev3（205）、
 /// fanyi.youdao.com 的旧 translate 接口（302 到网页）。
 ///
 /// 所有结果都落盘缓存（按文本哈希），列表里显示中文标题时只读缓存、绝不逐行发请求。
 /// </summary>
 public sealed class Translator : IDisposable
 {
+    /// <summary>谷歌免费端点单次最大字符数（实测 5000 可用；取 4000 留 URL 长度余量）。</summary>
+    private const int GoogleChunk = 4000;
+
     /// <summary>腾讯接口单次请求的最大字符数（curl 实测 6000 可用；取 4500 留余量）。</summary>
     private const int TencentChunk = 4500;
 
@@ -57,8 +63,10 @@ public sealed class Translator : IDisposable
 
     private const string YoudaoUrl = "https://aidemo.youdao.com/trans";
     private const string TencentUrl = "https://transmart.qq.com/api/imt";
+    private const string GoogleUrl = "https://translate.googleapis.com/translate_a/single";
 
     private readonly HttpClient _http;
+    private readonly bool _ownsHttp;
     private readonly ITranslateSettings _cfg;
     private readonly Action<string>? _log;
     private readonly string _cachePath;
@@ -66,11 +74,44 @@ public sealed class Translator : IDisposable
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _saveLock = new();
 
-    public Translator(HttpClient http, ITranslateSettings cfg, string cacheDirectory, Action<string>? log = null)
+    /// <param name="http">可选的共享 HttpClient（测用；传 null 则自建，并按配置套代理）。</param>
+    public Translator(ITranslateSettings cfg, string cacheDirectory, Action<string>? log = null, HttpClient? http = null)
     {
-        _http = http;
         _cfg = cfg;
         _log = log;
+
+        if (http is not null)
+        {
+            _http = http;
+        }
+        else
+        {
+            // 翻译自己一个 HttpClient：代理可以单独配，也避免和下载/缩略图互相影响。
+            var handler = new SocketsHttpHandler
+            {
+                ConnectTimeout = TimeSpan.FromSeconds(20),
+                PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+            };
+
+            var proxy = (cfg.TranslateProxy ?? string.Empty).Trim();
+            if (proxy.Length > 0)
+            {
+                if (Uri.TryCreate(proxy, UriKind.Absolute, out var proxyUri))
+                {
+                    handler.Proxy = new WebProxy(proxyUri);
+                    handler.UseProxy = true;
+                }
+                else
+                {
+                    log?.Invoke($"代理地址看不懂，已忽略：{proxy}（应形如 http://127.0.0.1:7877）");
+                }
+            }
+            // 没配就保持默认：.NET 会用 Windows 系统代理（这是谷歌能通的关键）。
+
+            _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
+            _ownsHttp = true;
+        }
+
         try
         {
             Directory.CreateDirectory(cacheDirectory);
@@ -85,14 +126,17 @@ public sealed class Translator : IDisposable
 
     /// <summary>后端显示名（UI 里用）。</summary>
     public string BackendName => IsLlm ? $"OpenAI 兼容（{_cfg.TranslateModel}）"
-                              : IsYoudao ? "有道公共接口（免 Key，默认）"
-                                         : "腾讯交互翻译（免 Key）";
+                              : IsYoudao ? "有道公共接口（免 Key）"
+                              : IsTencent ? "腾讯交互翻译（免 Key）"
+                                          : "谷歌翻译（免 Key）";
 
     private string BackendId => (_cfg.TranslateBackend ?? string.Empty).Trim().ToLowerInvariant();
 
     private bool IsLlm => BackendId == "openai";
 
     private bool IsYoudao => BackendId == "youdao";
+
+    private bool IsTencent => BackendId == "tencent";
 
     /// <summary>配置是否够用（LLM 后端需要 Key）。</summary>
     public bool IsConfigured => !IsLlm || (!string.IsNullOrWhiteSpace(_cfg.TranslateApiKey) &&
@@ -123,7 +167,9 @@ public sealed class Translator : IDisposable
             ? await TranslateViaLlmAsync(text, ct).ConfigureAwait(false)
             : IsYoudao
                 ? await TranslateViaYoudaoAsync(text, ct).ConfigureAwait(false)
-                : await TranslateViaTencentAsync(text, ct).ConfigureAwait(false);
+                : IsTencent
+                    ? await TranslateViaTencentAsync(text, ct).ConfigureAwait(false)
+                    : await TranslateViaGoogleAsync(text, ct).ConfigureAwait(false);
 
         result = result.Trim();
         if (result.Length == 0) throw new InvalidOperationException("翻译接口回了空结果");
@@ -141,7 +187,61 @@ public sealed class Translator : IDisposable
         return outp;
     }
 
-    // ---------------------------------------------------------------- 腾讯交互翻译（免 Key，默认）
+    // ---------------------------------------------------------------- 谷歌免费端点（免 Key，默认）
+
+    private async Task<string> TranslateViaGoogleAsync(string text, CancellationToken ct)
+    {
+        var parts = new List<string>();
+        foreach (var chunk in Split(text, GoogleChunk))
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // client=gtx 是不需要 Key 的那个网页端点；dt=t 让它按段返回译文
+            var url = $"{GoogleUrl}?client=gtx&sl=auto&tl=zh-CN&dt=t&q={Uri.EscapeDataString(chunk)}";
+            using var resp = await _http.GetAsync(url, ct).ConfigureAwait(false);
+            var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+
+            if (!resp.IsSuccessStatusCode)
+                throw new InvalidOperationException(
+                    $"谷歌翻译 HTTP {(int)resp.StatusCode}（连不上的话通常是没走代理：设置里填代理，或换国内后端）：{Shorten(body)}");
+
+            var translated = ReadGoogleTranslation(body);
+            if (translated.Length == 0)
+                throw new InvalidOperationException("谷歌翻译没给出译文：" + Shorten(body));
+            parts.Add(translated.TrimEnd('\n'));
+        }
+
+        return string.Join("\n", parts);
+    }
+
+    /// <summary>
+    /// 解析谷歌 <c>translate_a/single?dt=t</c> 的返回。真实样本（实测抓的）：
+    /// 单段 → <c>[[["你好","hi",null,null,10]],null,"en",null,null,null,null,[]]</c>
+    /// 多段 → <c>[[["第一段译文\n","第一段原文\n",...],["第二段译文","第二段原文",...]],null,"en",...]</c>
+    /// 即 <c>root[0]</c> 是段数组，每段的 <c>[0]</c> 是该段译文，要按顺序拼起来（换行在译文里）。
+    /// </summary>
+    internal static string ReadGoogleTranslation(string body)
+    {
+        try
+        {
+            var node = JsonNode.Parse(body);
+            if (node?[0] is not JsonArray segments) return string.Empty;
+
+            var sb = new StringBuilder();
+            foreach (var seg in segments)
+            {
+                if (seg is JsonArray { Count: > 0 } part)
+                    sb.Append(part[0]?.GetValue<string>() ?? string.Empty);
+            }
+            return sb.ToString();
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    // ---------------------------------------------------------------- 腾讯交互翻译（免 Key）
 
     private async Task<string> TranslateViaTencentAsync(string text, CancellationToken ct)
     {
@@ -446,5 +546,9 @@ public sealed class Translator : IDisposable
 
     private static string Shorten(string s) => s.Length <= 160 ? s : s[..160] + "…";
 
-    public void Dispose() => _gate.Dispose();
+    public void Dispose()
+    {
+        _gate.Dispose();
+        if (_ownsHttp) _http.Dispose();
+    }
 }
