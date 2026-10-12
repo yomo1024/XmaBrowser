@@ -91,10 +91,15 @@ def main() -> int:
         })
         return e
 
-    # pluginmaster.json 放**仓库根**（Dalamud 自定义插件源直接指这个地址），zip 放 dist/
-    # 两份清单只差下载地址：cdn（jsdelivr，国内稳）与 raw（raw.githubusercontent，作为备用源）
-    for fname, link in (("pluginmaster.json", cdn_url), ("pluginmaster-raw.json", raw_url),
-                        ("pluginmaster-gh.json", gh_url)):
+    # 主源用 raw.githubusercontent —— 与主人「已在用的」ModBridge 仓库同一套路（那份清单就是走 raw），
+    # 且没有 jsdelivr 对新建仓库的「负缓存 404」问题（实测踩过：新提交后 jsdelivr 曾返回
+    # "Couldn't find the requested file"，必须手动 purge 才恢复）。
+    # jsdelivr 作为备选源（国内多数网络更快，但对新路径要 purge 才即时生效）。
+    for fname, link, host in (
+        ("pluginmaster.json",     raw_url, "raw.githubusercontent（主）"),
+        ("pluginmaster-cdn.json", cdn_url, "jsdelivr（备选）"),
+        ("pluginmaster-gh.json",  gh_url,  "GitHub Release 附件（以后发 Release 用）"),
+    ):
         with open(os.path.join(ROOT, fname), "w", encoding="utf-8") as f:
             json.dump([manifest_for(link)], f, ensure_ascii=False, indent=2)
             f.write("\n")
@@ -102,10 +107,11 @@ def main() -> int:
     size_mb = os.path.getsize(zip_path) / 1048576.0
     print("插件：%s v%s（API %s）" % (manifest["Name"], ver3, manifest["DalamudApiLevel"]))
     print("zip ：%s  （%.2f MB，来自 %s）" % (zip_name, size_mb, source))
-    print("清单：pluginmaster.json（jsdelivr）/ pluginmaster-gh.json（Release）")
-    print("Dalamud 插件源地址（粘这个）：")
-    print("   https://cdn.jsdelivr.net/gh/%s@%s/pluginmaster.json" % (REPO, BRANCH))
-    print("   备用（jsdelivr 没缓存时）：https://raw.githubusercontent.com/%s/%s/pluginmaster.json" % (REPO, BRANCH))
+    print("清单：pluginmaster.json（主，raw）/ pluginmaster-cdn.json（备，jsdelivr）/ pluginmaster-gh.json（Release）")
+    print("Dalamud 自定义插件源 —— 主地址（粘这个）：")
+    print("   https://raw.githubusercontent.com/%s/%s/pluginmaster.json" % (REPO, BRANCH))
+    print("备选（主地址不通时）：")
+    print("   https://cdn.jsdelivr.net/gh/%s@%s/pluginmaster-cdn.json" % (REPO, BRANCH))
 
     # 自检：zip 里必须能读到清单，且 InternalName/版本对得上
     with zipfile.ZipFile(zip_path) as z:

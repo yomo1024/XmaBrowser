@@ -1,0 +1,9 @@
+fix(pack): 主源改回 raw.githubusercontent，jsdelivr 降为备选
+
+主人反馈：加自定义插件源之后，列表里根本不出现该插件（说明清单压根没取到）。
+
+本机实测复现过 jsdelivr 对新建仓库返回负缓存 404（Couldn't find the requested
+file），必须手动 purge 才恢复 —— 主人很可能撞上同一个缓存窗口。
+
+主人已在用的 ModBridge 清单正是走 raw.githubusercontent，因此主源与它对齐；
+jsdelivr 版清单改名为 pluginmaster-cdn.json 作为备选源。

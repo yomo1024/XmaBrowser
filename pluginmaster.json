@@ -30,8 +30,8 @@
     "IsHide": false,
     "IsTestingExclusive": false,
     "LastUpdate": 1791773899,
-    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/yomo1024/XmaBrowser@main/dist/XmaBrowser-v0.1.0.zip",
-    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/yomo1024/XmaBrowser@main/dist/XmaBrowser-v0.1.0.zip",
+    "DownloadLinkInstall": "https://raw.githubusercontent.com/yomo1024/XmaBrowser/main/dist/XmaBrowser-v0.1.0.zip",
+    "DownloadLinkUpdate": "https://raw.githubusercontent.com/yomo1024/XmaBrowser/main/dist/XmaBrowser-v0.1.0.zip",
     "DownloadLinkTesting": ""
   }
 ]
