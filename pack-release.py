@@ -72,27 +72,32 @@ def main() -> int:
 
     gh_url = "https://github.com/%s/releases/download/v%s/%s" % (REPO, ver3, zip_name)
     cdn_url = "https://cdn.jsdelivr.net/gh/%s@%s/dist/%s" % (REPO, BRANCH, zip_name)
+    raw_url = "https://raw.githubusercontent.com/%s/%s/dist/%s" % (REPO, BRANCH, zip_name)
 
     def manifest_for(link):
+        # 字段结构照「已在主人的 Dalamud 里验证能用」的那份清单（ModBridge/FFXIV_XMA_Manager）对齐：
+        # 该补的元字段都补上，尤其是 LastUpdate 必须是 Unix 秒时间戳（不能是 null —— null 有反序列化风险）
         e = dict(manifest)
         e.update({
+            "CategoryTags": ["utility"],
+            "DownloadCount": 0,
+            "IconUrl": "",
+            "IsHide": False,
+            "IsTestingExclusive": False,
+            "LastUpdate": int(os.path.getmtime(zip_path)),
             "DownloadLinkInstall": link,
             "DownloadLinkUpdate": link,
-            "DownloadLinkTesting": link,
-            "LastUpdate": None,
+            "DownloadLinkTesting": "",
         })
         return e
 
     # pluginmaster.json 放**仓库根**（Dalamud 自定义插件源直接指这个地址），zip 放 dist/
-    root_dir = ROOT
-    with open(os.path.join(root_dir, "pluginmaster.json"), "w", encoding="utf-8") as f:
-        json.dump([manifest_for(cdn_url)], f, ensure_ascii=False, indent=2)
-        f.write("\n")
-
-    # pluginmaster-gh.json：同一个插件、下载链接换成 GitHub Release 附件（以后发 Release 用）
-    with open(os.path.join(root_dir, "pluginmaster-gh.json"), "w", encoding="utf-8") as f:
-        json.dump([manifest_for(gh_url)], f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    # 两份清单只差下载地址：cdn（jsdelivr，国内稳）与 raw（raw.githubusercontent，作为备用源）
+    for fname, link in (("pluginmaster.json", cdn_url), ("pluginmaster-raw.json", raw_url),
+                        ("pluginmaster-gh.json", gh_url)):
+        with open(os.path.join(ROOT, fname), "w", encoding="utf-8") as f:
+            json.dump([manifest_for(link)], f, ensure_ascii=False, indent=2)
+            f.write("\n")
 
     size_mb = os.path.getsize(zip_path) / 1048576.0
     print("插件：%s v%s（API %s）" % (manifest["Name"], ver3, manifest["DalamudApiLevel"]))
