@@ -64,6 +64,57 @@ public sealed class BrowserChannel : IDisposable
 
     public bool Enabled => _cfg.EnableBrowserChannel;
 
+    /// <summary>
+    /// **预热**：提前把 headless 浏览器拉起来、连上 CDP，但**不访问站点**
+    /// （打开 about:blank，不给站点多打一个请求）。
+    ///
+    /// 为什么要：通道取一页的固定成本里，会话冷启动实测约 1.1 秒
+    /// （检测浏览器 60 ms → 拉起进程 → 等 CDP 端点 → 连 WebSocket）。
+    /// NSFW 的详情、预览图都要走通道，所以「搜完 NSFW 就顺手预热」能让
+    /// 后面每一次点开详情都省掉这 1 秒 —— 而且不需要额外请求。
+    /// </summary>
+    public async Task<bool> WarmUpAsync(CancellationToken ct = default)
+    {
+        if (_disposed || !Enabled) return false;
+        if (_session is { Usable: true }) return true;      // 已经热着，什么都不用做
+
+        try
+        {
+            await _opLock.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { return false; }
+
+        try
+        {
+            if (_session is { Usable: true }) return true;   // 等在锁上时别人已经热好了
+
+            var candidate = PickCandidate();
+            if (candidate is null) return false;
+
+            if (_session is { } dead) DropSession(dead);
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            _session = await Session.StartAsync(candidate, _cfg, _log, ct).ConfigureAwait(false);
+            LastUsedBrowser = candidate;
+            _lastOpUtc = DateTime.UtcNow;
+            _log.Info($"浏览器通道预热完成：{sw.ElapsedMilliseconds} ms（{candidate.Label}，未访问站点）");
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception e)
+        {
+            _log.Debug($"浏览器通道预热失败（不影响后面的正式调用）：{e.GetType().Name} {e.Message}");
+            return false;
+        }
+        finally
+        {
+            _opLock.Release();
+        }
+    }
+
     /// <summary>探测本机能用的浏览器（Chrome / Edge / CentBrowser / Brave）。</summary>
     public static List<BrowserCandidate> Detect()
     {
@@ -96,6 +147,80 @@ public sealed class BrowserChannel : IDisposable
 
     /// <summary>登录等待上限（分钟）：要到 Discord 那边输账号/过 2FA，给宽一点。</summary>
     public const int LoginWaitMinutes = 5;
+
+    /// <summary>
+    /// 挑战页重试前的等待（毫秒）。原来写死 2500 —— 站点挑战时那是纯等待，
+    /// 一轮就是 2.5 秒 + 一次完整导航。实测挑战多半是瞬时的，1200 毫秒足够给它缓一下。
+    /// </summary>
+    internal const int ChallengeRetryDelayMs = 1200;
+
+    /// <summary>
+    /// 通道里屏蔽的广告/统计**域名**。
+    /// 我们只用 DOM（卡片/标题/下载链接），而这些脚本会把页面「加载完成」拖到好几秒。
+    /// ⚠ 刻意**不含** xivmodarchive.com（那是我们要取的页面与预览图），
+    /// 也不含任何 consent/验证类域名（动它们可能把整个页面搞坏）。
+    /// </summary>
+    internal static readonly string[] BlockedHosts =
+    [
+        "googletagmanager.com",
+        "google-analytics.com",
+        "googlesyndication.com",
+        "doubleclick.net",
+        "nitropay.com",
+        "adnxs.com",
+        "amazon-adsystem.com",
+        "criteo.com",
+        "criteo.net",
+        "taboola.com",
+        "outbrain.com",
+        "scorecardresearch.com",
+        "quantserve.com",
+        "pubmatic.com",
+        "rubiconproject.com",
+        "openx.net",
+        "casalemedia.com",
+        "sharethrough.com",
+        "smaato.net",
+        "adform.net",
+        "33across.com",
+        "gumgum.com",
+        "smartadserver.com",
+        "yieldmo.com",
+        "triplelift.com",
+        "adsrvr.org",
+        "moatads.com",
+    ];
+
+    /// <summary>CDP 用的屏蔽模式（第二道防线，主要拦子资源）。</summary>
+    internal static string[] AdPatterns => BlockedHosts.Select(h => $"*://*.{h}/*").ToArray();
+
+    /// <summary>
+    /// 把广告域名解析到 127.0.0.1（连不上的话立刻失败，比等超时强）。
+    ///
+    /// ⭐ 为什么用启动参数而不是只靠 CDP：实测 CDP 的 `Network.setBlockedURLs`
+    /// **拦不住顶层导航** —— 直接导航到被屏蔽的域名照样能拿到内容（我的 A/B 测试当场抓到这个）。
+    /// host-resolver 规则是解析层的，对子资源和顶层导航一视同仁。
+    /// </summary>
+    internal static string HostResolverRules =>
+        string.Join(",", BlockedHosts.SelectMany(h => new[] { $"MAP *.{h} 127.0.0.1", $"MAP {h} 127.0.0.1" }));
+
+    /// <summary>
+    /// 让浏览器起得更快、更安静的开关。我们只读 DOM，所以这些都是安全的
+    /// （不会改渲染、不会丢内容），纯粹少干无关的活。
+    /// </summary>
+    private static readonly string[] PerfArgs =
+    [
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-domain-reliability",
+        "--disable-sync",
+        "--metrics-recording-only",
+        "--mute-audio",
+        "--no-pings",
+        "--no-service-autorun",
+        "--disable-features=Translate,MediaRouter,OptimizationHints",
+    ];
 
     /// <summary>插件自带 profile 的默认位置（用户没自定义时用它）。</summary>
     public static string DefaultOwnedProfileDir => Path.Combine(
@@ -424,7 +549,7 @@ public sealed class BrowserChannel : IDisposable
             _lastError = $"{why} —— 这不等于“没有结果”；稍后再试";
             _log.Warn($"浏览器通道取页面第 {attempt} 次没成功：{_lastError}（{url[..Math.Min(60, url.Length)]}）");
 
-            if (attempt == 1) await Task.Delay(2500, ct).ConfigureAwait(false);   // 给挑战页一点时间自己放行
+            if (attempt == 1) await Task.Delay(ChallengeRetryDelayMs, ct).ConfigureAwait(false);   // 给挑战页一点时间自己放行
         }
         return null;
     }
@@ -435,6 +560,8 @@ public sealed class BrowserChannel : IDisposable
 
     private async Task<string?> NavigateAndGrabAsync(Session s, string url, CancellationToken ct)
     {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await s.EnsureAdBlockingAsync(ct).ConfigureAwait(false);
         await s.Cdp.SendAsync("Page.enable", null, ct).ConfigureAwait(false);
         await s.Cdp.SendAsync("Page.navigate", new { url }, ct).ConfigureAwait(false);
 
@@ -485,8 +612,9 @@ public sealed class BrowserChannel : IDisposable
             new { expression = "document.documentElement.outerHTML", returnByValue = true }, ct, 60_000)
             .ConfigureAwait(false);
         var outer = CdpClient.Value(html);
-        var took = DateTime.UtcNow - hardDeadline.AddSeconds(-5);   // 从进入本方法算起的大致耗时
-        _log.Info($"浏览器通道取页面 {url[..Math.Min(60, url.Length)]}… → {outer?.Length ?? 0} 字节（约 {took.TotalMilliseconds:0} ms）");
+        // 之前这里用 "hardDeadline.AddSeconds(-5)" 反推耗时 —— 硬上限改过就失准，纯属瞎算。
+        // 现在老老实实拿秒表量（从这个方法进门算起）。
+        _log.Info($"浏览器通道取页面 {url[..Math.Min(60, url.Length)]}… → {outer?.Length ?? 0} 字节（{sw.ElapsedMilliseconds} ms）");
         return outer;
     }
 
@@ -555,6 +683,7 @@ public sealed class BrowserChannel : IDisposable
     private async Task<byte[]?> FetchImageCoreAsync(Session s, string url, CancellationToken ct)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
+        await s.EnsureAdBlockingAsync(ct).ConfigureAwait(false);
         await s.Cdp.SendAsync("Page.enable", null, ct).ConfigureAwait(false);
         await s.Cdp.SendAsync("Page.navigate", new { url }, ct).ConfigureAwait(false);
 
@@ -770,7 +899,9 @@ public sealed class BrowserChannel : IDisposable
         public CdpClient Cdp { get; }
         public string DownloadDir { get; }
         private readonly bool _cleanupProfile;
+        private readonly bool _blockAds;
         private readonly IXmaLog _log;
+        private bool _blockAdsSet;
 
         public bool Alive
         {
@@ -788,7 +919,8 @@ public sealed class BrowserChannel : IDisposable
         /// </summary>
         public bool Usable => Alive && Cdp.IsOpen;
 
-        private Session(Process process, CdpClient cdp, string profileDir, string downloadDir, bool cleanup, IXmaLog log)
+        private Session(Process process, CdpClient cdp, string profileDir, string downloadDir, bool cleanup,
+                        IXmaLog log, bool blockAds)
         {
             _process = process;
             Cdp = cdp;
@@ -796,6 +928,28 @@ public sealed class BrowserChannel : IDisposable
             DownloadDir = downloadDir;
             _cleanupProfile = cleanup;
             _log = log;
+            _blockAds = blockAds;
+        }
+
+        /// <summary>
+        /// 屏蔽广告/统计脚本（每个会话设一次）。
+        /// 我们只用 DOM，而站点的广告脚本会把页面「加载完成」拖到好几秒 —— 屏蔽后 DOM 该有的还在，
+        /// 页面却早得多稳定下来。设不上也不影响正确性，所以失败只记 Debug。
+        /// </summary>
+        public async Task EnsureAdBlockingAsync(CancellationToken ct)
+        {
+            if (!_blockAds || _blockAdsSet) return;
+            _blockAdsSet = true;
+            try
+            {
+                await Cdp.SendAsync("Network.enable", null, ct, 10_000).ConfigureAwait(false);
+                await Cdp.SendAsync("Network.setBlockedURLs", new { urls = AdPatterns }, ct, 10_000)
+                         .ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                _log.Debug($"浏览器通道：广告屏蔽没设上（不影响正确性）：{e.Message}");
+            }
         }
 
         public static async Task<Session> StartAsync(BrowserCandidate browser, IBrowserSettings cfg, IXmaLog log,
@@ -841,6 +995,8 @@ public sealed class BrowserChannel : IDisposable
             args.Add("--no-first-run");
             args.Add("--no-default-browser-check");
             args.Add("--disable-extensions");
+            args.AddRange(PerfArgs);                      // 起得更快、更安静（我们只读 DOM）
+            if (cfg.ChannelBlockAds) args.Add("--host-resolver-rules=" + HostResolverRules);
             args.Add($"--remote-debugging-port={port}");
             args.Add($"--user-data-dir={profileDir}");
             args.Add(startUrl ?? "about:blank");
@@ -865,7 +1021,7 @@ public sealed class BrowserChannel : IDisposable
             }
 
             var cdp = await CdpClient.ConnectAsync(wsUrl, ct).ConfigureAwait(false);
-            return new Session(proc, cdp, profileDir, downloadDir, cleanup, log);
+            return new Session(proc, cdp, profileDir, downloadDir, cleanup, log, cfg.ChannelBlockAds);
         }
 
         /// <summary>

@@ -55,6 +55,9 @@ public class MainWindow : Window
     /// <summary>站点一页固定 15 条（实测），用于算总页数。</summary>
     private const int SitePageSize = 15;
     private string _status = "留空关键词直接搜 = 看最新发布";
+    // 加载进度（分段预估 + 已用时间；纯逻辑类，可离线自测）
+    private LoadProgress _searchProgress = LoadProgress.ForSearch();
+    private LoadProgress _detailProgress = LoadProgress.ForDetail();
     private string _error = string.Empty;
 
     /// <summary>NSFW 模式走通道时，通道不可用的退回提示（显示在状态行下面）。</summary>
@@ -271,6 +274,8 @@ public class MainWindow : Window
             ImGui.TextColored(Red, _error);
         else
             ImGui.TextColored(_busy ? Yellow : Green, _status);
+
+        if (_busy) DrawLoadProgress(_searchProgress, S(360f));
 
         if (_nsfwChannelWarn.Length > 0)
             ImGui.TextColored(Yellow, "⚠ " + _nsfwChannelWarn);
@@ -1040,6 +1045,23 @@ public class MainWindow : Window
     /// <summary>按字符数截断（中英混排够用，不追求像素精确）。</summary>
     private static string Clip(string s, int max) => s.Length <= max ? s : s[..max] + "…";
 
+    /// <summary>
+    /// 画一条加载进度条（分段模型给的进度 + 一行说明）。
+    /// 只解析 DOM 之外的事情都跟用户感知无关，所以这里只呈现「还要多久」。
+    /// </summary>
+    private void DrawLoadProgress(LoadProgress p, float width = -1f)
+    {
+        if (!p.Running && !p.Failed) return;
+
+        if (!p.Failed)
+        {
+            ImGui.PushStyleColor(ImGuiCol.PlotHistogram, Blue);
+            ImGui.ProgressBar(p.Fraction, new Vector2(width, S(14f)), $"{p.Fraction * 100f:0}%");
+            ImGui.PopStyleColor();
+        }
+        ImGui.TextColored(p.Failed ? Red : Dim, p.Describe());
+    }
+
     private void DrawDetailPane()
     {
         var hit = _selected;
@@ -1052,6 +1074,14 @@ public class MainWindow : Window
         if (_detailBusy)
         {
             ImGui.TextColored(Yellow, $"正在读取 {hit.ModId} 的详情…");
+
+            // 先把列表里那张缩略图顶上，给个视觉锚点 —— 别让人对着空白等
+            if (hit.ThumbUrl.Length > 0)
+            {
+                var tw = _plugin.Thumbs.Get(hit.ThumbUrl)?.GetWrapOrDefault();
+                if (tw is not null) ImGui.Image(tw.Handle, Fit(tw.Size, ImGui.GetContentRegionAvail().X, S(150f)));
+            }
+            DrawLoadProgress(_detailProgress, ImGui.GetContentRegionAvail().X);
             return;
         }
 
@@ -1059,6 +1089,7 @@ public class MainWindow : Window
         if (d is null)
         {
             ImGui.TextColored(Red, _error.Length > 0 ? _error : "详情读取失败。");
+            if (_detailProgress.Failed) ImGui.TextColored(Dim, _detailProgress.Describe());
             ImGui.Spacing();
 
             // 读不到详情时，最可能的原因就是「需要登录态」—— 直接把登录入口放在这儿，
@@ -1106,6 +1137,9 @@ public class MainWindow : Window
         }
         ImGui.Separator();
 
+        // 这条 mod 没有预览图 → 进度到此为止（否则进度条会一直挂在「加载预览图」）
+        if (d.Images.Count == 0 && _detailProgress.Running) _detailProgress.Complete();
+
         if (d.Images.Count > 0)
         {
             var idx = ((_previewIndex % d.Images.Count) + d.Images.Count) % d.Images.Count;
@@ -1114,12 +1148,29 @@ public class MainWindow : Window
             // 只对「用户正在看的这一张」开放通道（列表里 15 张缩略图不能一起涌进通道）。
             var previewUrl = d.Images[idx];
             var wrap = _plugin.Thumbs.Get(previewUrl, allowChannel: true)?.GetWrapOrDefault();
-            if (wrap is not null) ImGui.Image(wrap.Handle, Fit(wrap.Size, w, 230f));
+            if (wrap is not null)
+            {
+                ImGui.Image(wrap.Handle, Fit(wrap.Size, w, 230f));
+                if (_detailProgress.Running) _detailProgress.Complete();
+            }
             else
             {
-                ImGui.Dummy(new Vector2(w, 30));
                 var st = _plugin.Thumbs.Status(previewUrl);
-                if (st.Length > 0) ImGui.TextColored(Dim, "预览图：" + st);
+                if (st.StartsWith("失败", StringComparison.Ordinal))
+                {
+                    ImGui.TextColored(Dim, "预览图：" + st);
+                    if (_detailProgress.Running) _detailProgress.Fail(st);
+                }
+                else if (_detailProgress.Running)
+                {
+                    // 图还在取 → 用进度条填住这个位置（比一块空白强得多）
+                    DrawLoadProgress(_detailProgress, w);
+                }
+                else
+                {
+                    ImGui.Dummy(new Vector2(w, S(30f)));
+                    if (st.Length > 0) ImGui.TextColored(Dim, "预览图：" + st);
+                }
             }
 
             if (d.Images.Count > 1)
@@ -1712,6 +1763,29 @@ public class MainWindow : Window
                              "之后通道一直用它（这个目录**永不自动删除**）。\n" +
                              $"默认：{BrowserChannel.DefaultOwnedProfileDir}");
 
+        var blockAds = cfg.ChannelBlockAds;
+        if (ImGui.Checkbox("通道内屏蔽广告/统计脚本（加载更快）", ref blockAds))
+        {
+            cfg.ChannelBlockAds = blockAds;
+            changed = true;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("插件只读页面的 DOM（卡片/标题/下载链接），广告与统计脚本纯粹是拖慢加载，\n" +
+                             "而且会把页面「加载完成」推到好几秒之后。屏蔽后 DOM 该有的还在，页面早得多稳下来。\n" +
+                             "万一某个页面因此少了内容，把这个关掉即可。");
+
+        ImGui.SameLine();
+        var idle = cfg.ChannelIdleMinutes;
+        ImGui.SetNextItemWidth(160);
+        if (ImGui.InputInt("通道空闲关闭（分钟）", ref idle))
+        {
+            cfg.ChannelIdleMinutes = Math.Clamp(idle, 0, 120);
+            changed = true;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("headless 浏览器常驻要占上百 MB 内存，闲着就关掉；代价是下次用要重新启动（实测约 1 秒）。\n" +
+                             "想让点开详情最快，把它设大一点（例如 15）—— 0 表示一直留着。");
+
         var timeout = cfg.BrowserTimeoutSec;
         ImGui.SetNextItemWidth(160);
         if (ImGui.InputInt("通道超时（秒）", ref timeout))
@@ -2064,6 +2138,7 @@ public class MainWindow : Window
         _totalMods = result.TotalMods;
         _selected = null;
         _detail = null;
+        _searchProgress.Complete();
         _status = result.Hits.Count == 0
             ? (fromCache ? "这一页没有结果（缓存）" : "这一页没有结果 —— 换个关键词，或放宽筛选")
             : $"第 {page} 页，本页 {result.Hits.Count} 条" + (fromCache ? "（缓存，秒开）" : string.Empty);
@@ -2088,6 +2163,10 @@ public class MainWindow : Window
         _viaChannel = false;
         _status = $"搜索中…（第 {page} 页）";
 
+        _searchProgress = LoadProgress.ForSearch($"第 {page} 页");
+        _searchProgress.Begin();
+        var nsfwMode = _form.NsfwMode;
+
         var query = _form.ToQuery(page);
         var client = _plugin.Site;
         var channel = _plugin.Channel;
@@ -2103,6 +2182,7 @@ public class MainWindow : Window
                 // 短期缓存：翻回上一页 / 手滑重复搜同一条件时秒开（TTL 3 分钟，键是完整 URL）
                 if (_searchCache.TryGet(pageUrl, out var cached))
                 {
+                    _searchProgress.Enter(0, "命中缓存");
                     _plugin.Jobs.Note($"搜索缓存命中：{pageUrl[..Math.Min(80, pageUrl.Length)]}");
                     ApplySearchResult(cached, page, fromCache: true);
                     return;
@@ -2121,6 +2201,7 @@ public class MainWindow : Window
 
                 if (channelFirst)
                 {
+                    _searchProgress.Enter(1, "浏览器通道");
                     var chSw = System.Diagnostics.Stopwatch.StartNew();
                     var chHtml = await channel.GetHtmlAsync(pageUrl, ct).ConfigureAwait(false);
                     chSw.Stop();
@@ -2128,6 +2209,7 @@ public class MainWindow : Window
 
                     if (chHtml is { Length: > 0 } chHtmlOk)
                     {
+                        _searchProgress.Enter(2, "解析");
                         var parseSw = System.Diagnostics.Stopwatch.StartNew();
                         result = XmaParser.ParseSearch(chHtmlOk, query.Page, pageUrl);
                         parseSw.Stop();
@@ -2149,6 +2231,7 @@ public class MainWindow : Window
                     else
                     {
                         // 通道不可用就别卡住：退回直连（普通内容照常看，NSFW 会缺）
+                        _searchProgress.Enter(1, "直连（通道失败）");
                         var dSw = System.Diagnostics.Stopwatch.StartNew();
                         result = await client.SearchAsync(query, ct).ConfigureAwait(false);
                         dSw.Stop();
@@ -2161,6 +2244,7 @@ public class MainWindow : Window
                 {
                     try
                     {
+                        _searchProgress.Enter(1, "直连");
                         var dSw = System.Diagnostics.Stopwatch.StartNew();
                         result = await client.SearchAsync(query, ct).ConfigureAwait(false);
                         dSw.Stop();
@@ -2173,11 +2257,13 @@ public class MainWindow : Window
                         if (directDenied.Reason == XmaBlockReason.CloudflareChallenge)
                             _directBlocked.MarkBlocked(DateTime.UtcNow);
                         _plugin.Jobs.Note($"搜索直连被拒（{directDenied.Reason}）→ 改走浏览器通道");
+                        _searchProgress.SetNote("直连被拒 → 通道");
                         // 直连被拒（Cloudflare 挑战 / 需要登录态）→ 交给浏览器通道重试一次
                         var html = await channel.GetHtmlAsync(pageUrl, ct).ConfigureAwait(false);
                         if (html is null || html.Length == 0)
                             throw new InvalidOperationException(directDenied.Message + "；浏览器通道也没取到：" + channel.LastError);
 
+                        _searchProgress.Enter(2, "解析");
                         result = XmaParser.ParseSearch(html, query.Page, pageUrl);
                         _viaChannel = true;
                         _viaChannelReason = XmaBlockClassifier.ShortLabel(directDenied.Reason);
@@ -2187,6 +2273,11 @@ public class MainWindow : Window
                 _searchCache.Put(pageUrl, result);
                 ApplySearchResult(result, page, fromCache: false);
 
+                // ⭐ 搜完就顺手把浏览器预热好：NSFW 模式下接下来点开的每个详情、每张预览图都要走通道，
+                // 提前把会话建好（实测省约 1 秒），点开就不用再等。**不访问站点**，所以没有额外请求。
+                if (nsfwMode != 0 && channel.Enabled)
+                    _ = Task.Run(() => channel.WarmUpAsync());
+
                 cfg.OnlyDtCompatible = _form.OnlyDtCompatible;
                 cfg.NsfwMode = _form.NsfwMode;
                 cfg.Save();
@@ -2195,15 +2286,18 @@ public class MainWindow : Window
             {
                 _error = e.Message;
                 _status = "被站点拒绝";
+                _searchProgress.Fail(e.Message);
             }
             catch (OperationCanceledException)
             {
                 _status = "已取消";
+                _searchProgress.Fail("已取消");
             }
             catch (Exception e)
             {
                 _error = $"{e.GetType().Name}: {e.Message}";
                 _status = "搜索失败";
+                _searchProgress.Fail(_error);
             }
             finally
             {
@@ -2231,6 +2325,11 @@ public class MainWindow : Window
         var cfg = _plugin.Configuration;
         var modId = hit.ModId;
         var pageUrl = XmaUrls.ModPage(modId);
+        var nsfwMode = _form.NsfwMode;
+
+        // 进度从这一刻开始算（含缓存判断）
+        _detailProgress = LoadProgress.ForDetail(hit.Title);
+        _detailProgress.Begin();
 
         // 详情短期缓存：同一条 mod 在几分钟内再看就直接用。
         // 为什么需要：NSFW 详情只能走通道（实测 2.8–3.6 秒，还要跟别人的通道操作排队），
@@ -2241,6 +2340,8 @@ public class MainWindow : Window
             _detailViaChannel = false;
             _detailChannelReason = "短缓存";
             _detailBusy = false;
+            _detailProgress.Enter(0, "命中缓存");
+            _detailProgress.Complete();
             _plugin.Jobs.Note($"详情命中短缓存：{cachedDetail.Title}");
             return;
         }
@@ -2255,12 +2356,22 @@ public class MainWindow : Window
             var directBlocked = canFallBack && _directBlocked.IsBlocked(DateTime.UtcNow);
             // 「只看 NSFW」模式下**每条结果都是 NSFW**。而 NSFW 的详情只有带登录态（浏览器通道）
             // 才看得见 —— 直连必然被拒。所以这种模式下别再白撞直连（实测每次白等 936 ms）。
-            var nsfwOnly = _form.NsfwMode == 2;
+            var nsfwOnly = nsfwMode == 2;
             // 混合模式下：这条 mod 之前已经被证实「需要登录态」→ 也别再撞
             var knownNeedsLogin = canFallBack && _needsLogin.Needs(modId, DateTime.UtcNow);
             var skipDirect = directBlocked || nsfwOnly || knownNeedsLogin;
+
+            // ⭐ 混合模式是「先直连、不行再走通道」。直连要 1 秒左右，等它失败再开会话等于白等这 1 秒 ——
+            // 所以**并行**把浏览器预热起来（预热只开浏览器、不访问站点，没有副作用）。
+            if (canFallBack && !skipDirect)
+            {
+                _detailProgress.Enter(1, "预热浏览器");
+                _ = Task.Run(() => channel.WarmUpAsync());
+            }
+
             if (!skipDirect)
             {
+                _detailProgress.Enter(2, "直连");
                 var dSw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
@@ -2273,6 +2384,7 @@ public class MainWindow : Window
                         _directBlocked.MarkHealthy();
                         _detailCache.Put(modId, parsed);
                         _plugin.Jobs.Note($"详情（直连）{dSw.ElapsedMilliseconds} ms：{parsed.Title}");
+                        _detailProgress.Enter(4, "预览图");
                         return;
                     }
 
@@ -2303,18 +2415,22 @@ public class MainWindow : Window
                 var cSw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
+                    _detailProgress.Enter(1, "准备浏览器");
                     var html = await channel.GetHtmlAsync(pageUrl).ConfigureAwait(false);
                     cSw.Stop();
+                    _detailProgress.Enter(2, "浏览器通道");
                     if (html is { Length: > 0 } htmlOk)
                     {
+                        _detailProgress.Enter(3, "解析");
                         var parsed = XmaParser.ParseDetail(htmlOk, modId, pageUrl);
                         if (parsed.Title.Length > 0 || parsed.DownloadHref.Length > 0)
                         {
                             _detail = parsed;
                             _detailViaChannel = true;
-                            _detailChannelReason = _form.NsfwMode != 0 ? "NSFW 模式（需登录态）" : "直连被拒";
+                            _detailChannelReason = nsfwMode != 0 ? "NSFW 模式（需登录态）" : "直连被拒";
                             if (parsed.Title.Length > 0) _detailCache.Put(modId, parsed);
                             _plugin.Jobs.Note($"详情（通道）{cSw.ElapsedMilliseconds} ms：{parsed.Title}");
+                            _detailProgress.Enter(4, "预览图");
                             return;
                         }
                     }
@@ -2328,12 +2444,19 @@ public class MainWindow : Window
 
             try
             {
+                _detailProgress.Enter(2, "直连");
                 _detail = await client.DetailAsync(modId).ConfigureAwait(false);
+                if (_detail.Title.Length > 0 || _detail.DownloadHref.Length > 0)
+                {
+                    _detailProgress.Enter(3, "预览图");
+                    return;
+                }
             }
             catch (XmaAccessException directDenied) when (channel.Enabled && cfg.AutoFallbackToBrowser)
             {
                 try
                 {
+                    _detailProgress.Enter(1, "准备浏览器");
                     var html = await channel.GetHtmlAsync(pageUrl).ConfigureAwait(false);
                     if (html is null || html.Length == 0)
                     {
@@ -2341,6 +2464,7 @@ public class MainWindow : Window
                     }
                     else
                     {
+                        _detailProgress.Enter(3, "解析");
                         var parsed = XmaParser.ParseDetail(html, modId, pageUrl);
                         if (parsed.Title.Length == 0 && parsed.DownloadHref.Length == 0)
                             _error = "取到的页面解析不出内容（站点结构可能变了）";
@@ -2349,6 +2473,7 @@ public class MainWindow : Window
                             _detail = parsed;
                             _detailViaChannel = true;
                             _detailChannelReason = XmaBlockClassifier.ShortLabel(directDenied.Reason);
+                            _detailProgress.Enter(4, "预览图");
                         }
                     }
                 }
@@ -2370,6 +2495,9 @@ public class MainWindow : Window
             finally
             {
                 _detailBusy = false;
+                // 没拿到详情就把进度条标成失败（别让它一直转）；
+                // 拿到了就停在「加载预览图」，由绘制那边在图到位时收尾 Complete。
+                if (_detail is null) _detailProgress.Fail(_error.Length > 0 ? _error : "没取到详情");
             }
         });
     }

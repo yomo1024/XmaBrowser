@@ -23,6 +23,7 @@ var nsfwDiag = args.Contains("nsfwdiag");
 var timingProbe = args.Contains("timing");
 var detailProbe = args.Contains("detailtime");
 var loginProbe = args.Contains("login");
+var perfProbe = args.Contains("perf");
 var oneCheck = args.Contains("one");
 var authorProbe = args.Contains("author");
 var pass = 0;
@@ -689,6 +690,74 @@ Console.WriteLine("=== 13j. 插件自带登录：探测判定 + profile 挑选�
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 13k. 加载进度模型（分段 / 只增不减 / 收尾）===");
+{
+    var p = new LoadProgress(new[]
+    {
+        new LoadProgress.Stage("一", 100),
+        new LoadProgress.Stage("二", 200),
+        new LoadProgress.Stage("三", 100),
+    });
+    Check("没开始时进度为 0", p.Fraction == 0f && !p.Running);
+
+    p.Begin();
+    Check("Begin 后进入第一个阶段", p.LastStageName == "一" && p.Running);
+    Check("刚开始进度接近 0", p.Fraction < 0.3f, p.Fraction.ToString("0.00"));
+
+    // 只增不减：每个阶段都采样几次，不允许出现回落
+    var last = -1f;
+    var monotonic = true;
+    foreach (var idx in new[] { 0, 1, 2 })
+    {
+        p.Enter(idx);
+        for (var i = 0; i < 4; i++)
+        {
+            Thread.Sleep(25);
+            var f = p.Fraction;
+            if (f < last - 0.0001f) monotonic = false;
+            last = f;
+        }
+    }
+    Check("进度只增不减（不会来回跳）", monotonic, last.ToString("0.00"));
+
+    // 阶段内的预估封顶：即使卡在这一阶段很久，也不能冲过该阶段的结束点
+    var slow = new LoadProgress(new[] { new LoadProgress.Stage("慢", 50), new LoadProgress.Stage("后", 50) });
+    slow.Begin();
+    Thread.Sleep(200);                     // 远超 50ms 预估
+    Check("阶段超时也不让进度冲过该阶段上限", slow.Fraction <= 0.51f, slow.Fraction.ToString("0.00"));
+
+    p.Complete();
+    Check("Complete 后进度正好 1", p.Fraction == 1f && p.Done && !p.Running);
+    Check("完成文案带用时", p.Describe().StartsWith("完成") && p.Describe().Contains("用时"), p.Describe());
+
+    // 回调顺序：Enter 只能前进，倒退/重复被忽略
+    var q = new LoadProgress(new[] { new LoadProgress.Stage("A", 100), new LoadProgress.Stage("B", 100) });
+    q.Begin();
+    q.Enter(1, "到 B");
+    q.Enter(0, "想倒回去");
+    Check("Enter 倒退被忽略（阶段仍是 B）", q.LastStageName == "B", q.LastStageName);
+
+    var r2 = new LoadProgress(new[] { new LoadProgress.Stage("A", 100) });
+    r2.Begin();
+    r2.Fail("网络炸了");
+    Check("失败被记录且不再 Running", r2.Failed && !r2.Running && !r2.Done);
+    Check("失败文案带原因", r2.Describe().Contains("网络炸了"), r2.Describe());
+    r2.Enter(0, "失败后还想推进");
+    Check("失败后 Enter 不再改状态", r2.Failed);
+
+    // 预置的两套分段要合理：详情比搜索长，且都 > 0
+    var det = LoadProgress.ForDetail();
+    var sea = LoadProgress.ForSearch();
+    Check("详情预估总时长 > 搜索", det.EstimatedTotalMs > sea.EstimatedTotalMs,
+          $"{det.EstimatedTotalMs} vs {sea.EstimatedTotalMs}");
+    Check("两套分段的预估都是正数", det.EstimatedTotalMs > 0 && sea.EstimatedTotalMs > 0);
+    Check("详情分段含「加载预览图」", det.StageCount >= 5);
+
+    // Describing 未开始时不该崩
+    Check("未开始时 Describe 不抛异常", new LoadProgress(new[] { new LoadProgress.Stage("x", 10) }).Describe().Length > 0);
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 13h. 挑战页/空页识别（浏览器通道取页面是否可用）===");
 {
     // 挑战页实测约 29KB —— 不能只按“小/空”判断，否则会把挑战页当成正常的“没有结果”。
@@ -1269,6 +1338,107 @@ if (loginProbe)
     Console.WriteLine($"  清除后目录还在？{Directory.Exists(outcome.ProfileDir)}（应为 False）");
 }
 
+if (perfProbe)
+{
+    // 优化后的分段计时：预热（只开会话）×2 + 预热后取详情页 ×2。
+    // 目的：把「会话冷启动」和「导航」拆开看，确认预热真的省掉了那 1 秒。
+    Console.WriteLine();
+    Console.WriteLine("=== 19. 优化后分段计时 ===");
+    var pSettings = new TestSettings();
+    using var pChannel = new BrowserChannel(pSettings, new TimeLog());
+
+    var pSw = System.Diagnostics.Stopwatch.StartNew();
+    var warmed = await pChannel.WarmUpAsync(CancellationToken.None);
+    pSw.Stop();
+    Console.WriteLine($"  ① 预热（只开会话，**不访问站点**）：{pSw.ElapsedMilliseconds} ms → {warmed}");
+
+    pSw.Restart();
+    var warmed2 = await pChannel.WarmUpAsync(CancellationToken.None);
+    pSw.Stop();
+    Console.WriteLine($"  ② 再预热一次（已热 → 应秒回）：{pSw.ElapsedMilliseconds} ms → {warmed2}");
+
+    pSw.Restart();
+    var h1 = await pChannel.GetHtmlAsync(XmaUrls.ModPage("141115"), CancellationToken.None);
+    pSw.Stop();
+    Console.WriteLine($"  ③ 预热后取详情页（= 用户点开详情的真实耗时，无冷启动）：{pSw.ElapsedMilliseconds} ms" +
+                      $" → {(h1?.Length ?? 0)} 字节" + (h1 is null ? $"（{pChannel.LastError}）" : string.Empty));
+
+    pSw.Restart();
+    var h2 = await pChannel.GetHtmlAsync(XmaUrls.ModPage("95080"), CancellationToken.None);
+    pSw.Stop();
+    Console.WriteLine($"  ④ 热态再取一页：{pSw.ElapsedMilliseconds} ms → {(h2?.Length ?? 0)} 字节");
+}
+
+Console.WriteLine();
+Console.WriteLine("=== 20. 广告屏蔽是否真的生效（子资源 A/B 对照）===");
+{
+    // ⚠ 第一版这个测试写错了，记下来免得再踩：
+    //   直接导航到被屏蔽的域名（顶层导航）**测不出** CDP 的 setBlockedURLs ——
+    //   它只拦页面发出的子资源请求，顶层导航不归它管。
+    //   而 --host-resolver-rules 在本机（走系统代理 127.0.0.1:7877）也测不出来：
+    //   DNS 是代理做的，本地解析规则根本不参与。
+    //   所以必须**真的用子资源**来验：本地写一个页面，让它去加载广告脚本。
+    //
+    // 页面放在路径含 /modid/ 的位置 —— 这样通道会按「详情页」的策略等
+    // `#mod-download-link, h1.display-5`，也就是等脚本的 onload/onerror 落地后再取 HTML。
+    const string marker = "googletagmanager.com";
+
+    var adDir = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "adtest", "modid");
+    Directory.CreateDirectory(adDir);
+    var adPage = Path.Combine(adDir, "probe.html");
+    File.WriteAllText(adPage,
+        "<html><body><script>\n" +
+        "var s=document.createElement('script');\n" +
+        $"s.src='https://www.{marker}/gtm.js?id=ADPROBE';\n" +
+        "s.onload=function(){document.body.setAttribute('data-result','LOADED');done();};\n" +
+        "s.onerror=function(){document.body.setAttribute('data-result','BLOCKED');done();};\n" +
+        "document.head.appendChild(s);\n" +
+        "function done(){var h=document.createElement('h1');h.className='display-5';" +
+        "h.textContent='done';document.body.appendChild(h);}\n" +
+        "</script></body></html>");
+    var adUrl = new Uri(adPage).AbsoluteUri;
+    Console.WriteLine($"  探测页：{adUrl}");
+
+    async Task<(string Result, long Ms)> TrySubresourceAsync(bool blockAds)
+    {
+        var st = new TestSettings { BlockAds = blockAds };
+        using var ch = new BrowserChannel(st, new NullLog());
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var html = await ch.GetHtmlAsync(adUrl, CancellationToken.None);
+        sw.Stop();
+        if (html is null) return ("取不到：" + ch.LastError, sw.ElapsedMilliseconds);
+        if (html.Contains("data-result=\"LOADED\"", StringComparison.Ordinal)) return ("LOADED", sw.ElapsedMilliseconds);
+        if (html.Contains("data-result=\"BLOCKED\"", StringComparison.Ordinal)) return ("BLOCKED", sw.ElapsedMilliseconds);
+        return ("没结果（脚本可能还没落地）", sw.ElapsedMilliseconds);
+    }
+
+    var offR = await TrySubresourceAsync(false);
+    Console.WriteLine($"  屏蔽【关】子资源结果：{offR.Result}（{offR.Ms} ms）");
+    var onR = await TrySubresourceAsync(true);
+    Console.WriteLine($"  屏蔽【开】子资源结果：{onR.Result}（{onR.Ms} ms）");
+
+    if (offR.Result != "LOADED")
+    {
+        Console.WriteLine($"  ⚠ 对照组没成立（关掉屏蔽也没加载成功：{offR.Result}）→ 无法判定，本次不下结论。");
+    }
+    else
+    {
+        Check("对照组：关掉屏蔽时广告脚本能被子资源加载", offR.Result == "LOADED", offR.Result);
+        Check("开启屏蔽后广告脚本被子资源层面拦掉", onR.Result == "BLOCKED", onR.Result);
+    }
+    Check("屏蔽名单里不含 xivmodarchive（否则会把要取的图/页面一起拦掉）",
+          !BrowserChannel.BlockedHosts.Any(h => h.Contains("xivmodarchive", StringComparison.OrdinalIgnoreCase)));
+    Check("屏蔽名单非空", BrowserChannel.BlockedHosts.Length > 10, BrowserChannel.BlockedHosts.Length.ToString());
+    Check("CDP 模式由域名派生（模式与名单不会走偏）",
+          BrowserChannel.AdPatterns.Length == BrowserChannel.BlockedHosts.Length &&
+          BrowserChannel.AdPatterns.All(p => p.StartsWith("*://*.") && p.EndsWith("/*")));
+    Check("host-resolver 规则每个域名都覆盖「带子域」与「裸域」两种写法",
+          BrowserChannel.HostResolverRules.Contains("MAP *.nitropay.com 127.0.0.1") &&
+          BrowserChannel.HostResolverRules.Contains("MAP nitropay.com 127.0.0.1"));
+    Check("host-resolver 规则里也不出现 xivmodarchive",
+          !BrowserChannel.HostResolverRules.Contains("xivmodarchive", StringComparison.OrdinalIgnoreCase));
+}
+
 Console.WriteLine();
 Console.WriteLine($"==== 结果：通过 {pass}，失败 {fail} ====");
 return fail == 0 ? 0 : 1;
@@ -1297,7 +1467,7 @@ internal sealed class TimeLog : IXmaLog
     private readonly System.Diagnostics.Stopwatch _sw = System.Diagnostics.Stopwatch.StartNew();
     public void Info(string message) => Console.WriteLine($"        · [{_sw.ElapsedMilliseconds,6} ms] {message}");
     public void Warn(string message) => Console.WriteLine($"        · [{_sw.ElapsedMilliseconds,6} ms] ⚠ {message}");
-    public void Debug(string message) { }
+    public void Debug(string message) => Console.WriteLine($"        · [{_sw.ElapsedMilliseconds,6} ms] · {message}");
     public void Error(string message) => Console.WriteLine($"        · [{_sw.ElapsedMilliseconds,6} ms] ✖ {message}");
 }
 
@@ -1311,5 +1481,8 @@ internal sealed class TestSettings : IXmaSettings, IBrowserSettings
     public int BrowserTimeoutSec => 180;
     public bool CleanupBorrowedProfile => true;
     public string ChannelProfileDir => string.Empty;
+    public bool ChannelBlockAds => BlockAds;
+    /// <summary>测试里可切换：用来做「屏蔽广告真的生效吗」的 A/B 对照。</summary>
+    public bool BlockAds { get; set; } = true;
     public int ChannelIdleMinutes => 0;      // 测试里别自动关，避免影响多次连续调用
 }

@@ -46,6 +46,7 @@
     <Compile Include="..\..\Diagnostics\NsfwDiagnostics.cs" />
     <Compile Include="..\..\Favorites\FavoriteStore.cs" />
     <Compile Include="..\..\Ui\UiScale.cs" />
+    <Compile Include="..\..\Ui\LoadProgress.cs" />
   </ItemGroup>
 
   <ItemGroup>

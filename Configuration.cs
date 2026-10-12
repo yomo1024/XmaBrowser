@@ -178,6 +178,16 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
     public string ChannelProfileDir { get; set; } = string.Empty;
 
     /// <summary>
+    /// 浏览器通道里屏蔽广告/统计脚本（默认开）。
+    ///
+    /// 为什么要：我们只用页面的 DOM（卡片、标题、下载链接），而站点的广告脚本
+    /// （nitropay 等）会把页面「加载完成」拖到好几秒 —— 实测死等 readyState=complete
+    /// 最坏要 10 秒以上。屏蔽掉这些域名后 DOM 该有的还是都有，页面却早得多稳定下来。
+    /// 关掉的唯一理由是万一某个 Mod 页依赖它们（目前没遇到）。
+    /// </summary>
+    public bool ChannelBlockAds { get; set; } = true;
+
+    /// <summary>
     /// 浏览器通道空闲多少分钟后关掉那个 headless 浏览器（0 = 一直留着）。
     /// headless Chrome 常驻占上百 MB 内存，闲着就关掉更符合这台机器的习惯；
     /// 代价是下次用要重新启动一次（约几秒）。

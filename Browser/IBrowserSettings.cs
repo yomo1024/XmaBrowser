@@ -16,6 +16,9 @@ public interface IBrowserSettings
     /// <summary>插件自带的浏览器 profile 目录（空 = 默认位置）。登录态就存在这里，长期复用。</summary>
     string ChannelProfileDir { get; }
 
+    /// <summary>通道里是否屏蔽广告/统计脚本（只用 DOM，屏蔽它们能显著加快页面稳定）。</summary>
+    bool ChannelBlockAds { get; }
+
     /// <summary>通道空闲多少分钟后关掉 headless 浏览器释放内存（0 = 一直留着）。</summary>
     int ChannelIdleMinutes { get; }
 }
