@@ -47,6 +47,7 @@
     <Compile Include="..\..\Favorites\FavoriteStore.cs" />
     <Compile Include="..\..\Ui\UiScale.cs" />
     <Compile Include="..\..\Ui\LoadProgress.cs" />
+    <Compile Include="..\..\Ui\ImageJobState.cs" />
   </ItemGroup>
 
   <ItemGroup>

@@ -24,6 +24,7 @@ var timingProbe = args.Contains("timing");
 var detailProbe = args.Contains("detailtime");
 var loginProbe = args.Contains("login");
 var perfProbe = args.Contains("perf");
+var imgProbe = args.Contains("imgprobe");
 var oneCheck = args.Contains("one");
 var authorProbe = args.Contains("author");
 var pass = 0;
@@ -758,6 +759,67 @@ Console.WriteLine("=== 13k. 加载进度模型（分段 / 只增不减 / 收尾�
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 13l. 同一张图被列表/详情先后请求（用户实测的「卡住」根因）===");
+{
+    const string img = "https://static.xivmodarchive.com/mod-images/a.jpg";
+
+    // 场景 1：列表先发起（只直连，不许占通道）
+    var st = new ImageJobState();
+    Check("列表先发起 → 应当开始下发", st.Request(img, allowChannel: false) == ImageJobState.Ask.Begin);
+    Check("此刻不许走通道（列表一页 15 张，不能把通道占满）", !st.ChannelAllowed(img));
+
+    // 详情面板随后请求同一张图（允许通道）
+    Check("详情随后请求同一张图 → 参与已有任务，不重复下发",
+          st.Request(img, allowChannel: true) == ImageJobState.Ask.Join);
+    // ⭐ 这就是原来缺的一步：后到的请求必须能给正在跑的任务升级权限
+    Check("⭐ 后到的请求给在跑的任务升级了通道权限（原来这里是静默丢弃 → 图永远不出来）",
+          st.ChannelAllowed(img));
+    Check("任务登记只有一条（没有重复下发）", st.Count == 1);
+
+    st.Finish(img);
+    Check("收尾后登记清空（否则这个 URL 再也不会被下发）", st.Count == 0 && !st.IsRunning(img));
+
+    // 场景 2：反过来 —— 详情先来（已授权通道），列表后到不该把权限降级
+    var st2 = new ImageJobState();
+    st2.Request(img, allowChannel: true);
+    st2.Request(img, allowChannel: false);
+    Check("后到的列表请求不会把通道权限降级", st2.ChannelAllowed(img));
+
+    // 场景 3：失败收尾后可以重新下发（否则重试永远不生效）
+    var st3 = new ImageJobState();
+    st3.Request(img, allowChannel: false);
+    st3.Finish(img);
+    Check("失败收尾后允许重新下发（重试才可能生效）",
+          st3.Request(img, allowChannel: true) == ImageJobState.Ask.Begin);
+
+    // 场景 4：不同图互不干扰
+    var st4 = new ImageJobState();
+    st4.Request("u1", false);
+    st4.Request("u2", false);
+    Check("不同 URL 各自独立", st4.Count == 2 && !st4.ChannelAllowed("u1") && !st4.ChannelAllowed("u2"));
+    st4.Finish("u1");
+    Check("收尾只影响自己那一条", st4.Count == 1 && st4.IsRunning("u2"));
+
+    // 空字符串也不能崩
+    var st5 = new ImageJobState();
+    st5.Request("", true);
+    Check("空 URL 不崩且行为一致", st5.Count == 1 && st5.ChannelAllowed(""));
+    st5.Finish("");
+    Check("空 URL 也能收尾", st5.Count == 0);
+
+    // 超时常量必须是有界的（无限等 = 进度条一直转）。
+    // 注意用数组接一下：这些是 const，直接比较的话编译器会把断言整个优化掉（CS8793），
+    // 那种「通过」是假的。
+    int[] limits = [ImageFetchLimits.DirectAttemptMs, ImageFetchLimits.JobTimeoutMs,
+                    ImageFetchLimits.FailureCooldownSeconds];
+    Check("直连有独立超时且不长（原来继承 HttpClient 的 30 分钟 = 等于没有上限）",
+          limits[0] > 0 && limits[0] <= 15000, limits[0].ToString());
+    Check("整条任务有硬上限（绝不无限等）", limits[1] > 0 && limits[1] <= 60000, limits[1].ToString());
+    Check("整条任务上限 > 直连上限（要留出回退通道的时间）", limits[1] > limits[0]);
+    Check("失败冷却有上限（到期会重新尝试）", limits[2] > 0 && limits[2] <= 3600, limits[2].ToString());
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 13h. 挑战页/空页识别（浏览器通道取页面是否可用）===");
 {
     // 挑战页实测约 29KB —— 不能只按“小/空”判断，否则会把挑战页当成正常的“没有结果”。
@@ -1437,6 +1499,105 @@ Console.WriteLine("=== 20. 广告屏蔽是否真的生效（子资源 A/B 对照
           BrowserChannel.HostResolverRules.Contains("MAP nitropay.com 127.0.0.1"));
     Check("host-resolver 规则里也不出现 xivmodarchive",
           !BrowserChannel.HostResolverRules.Contains("xivmodarchive", StringComparison.OrdinalIgnoreCase));
+}
+
+if (imgProbe)
+{
+    // 量 ThumbCache 走的那条直连路：它用的是插件共享的 HttpClient（30 分钟超时），
+    // 而且**没有**站点那套头（User-Agent / Referer）—— 和 XmaClient 不一样。
+    // 如果这条路会卡很久，那用户看到的「进度条一直转」就是它。
+    Console.WriteLine();
+    Console.WriteLine("=== 21. 预览图直连路径实测（ThumbCache 走的就是这条）===");
+    const string img = "https://static.xivmodarchive.com/mod-images/7a4c13b5-b5ac-45dd-b034-df43c7132387.jpg";
+
+    async Task ProbeAsync(string label, Action<HttpClient>? setup, int timeoutMs)
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(timeoutMs) };
+        setup?.Invoke(http);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            using var r = await http.GetAsync(img, HttpCompletionOption.ResponseContentRead, CancellationToken.None);
+            var bytes = await r.Content.ReadAsByteArrayAsync();
+            sw.Stop();
+            Console.WriteLine($"  {label}：{sw.ElapsedMilliseconds} ms → HTTP {(int)r.StatusCode}、" +
+                              $"{bytes.Length} 字节、{r.Content.Headers.ContentType?.MediaType}");
+        }
+        catch (Exception e)
+        {
+            sw.Stop();
+            Console.WriteLine($"  {label}：{sw.ElapsedMilliseconds} ms → {e.GetType().Name}" +
+                              (e is TaskCanceledException or OperationCanceledException ? "（超时）" : $": {e.Message}"));
+        }
+    }
+
+    await ProbeAsync("裸 HttpClient（ThumbCache 现状，30 分钟超时）", null, 60_000);
+    await ProbeAsync("带站点头（UA + Referer）", h =>
+    {
+        h.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", XmaUrls.UserAgent);
+        h.DefaultRequestHeaders.TryAddWithoutValidation("Referer", XmaUrls.Root + "/");
+        h.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "image/*,*/*");
+    }, 60_000);
+    await ProbeAsync("6 秒上限（v0.8.1 的新行为）", null, ImageFetchLimits.DirectAttemptMs);
+
+    Console.WriteLine($"  说明：v0.8.1 起直连单独 {ImageFetchLimits.DirectAttemptMs} ms 超时，" +
+                      $"整条任务 {ImageFetchLimits.JobTimeoutMs} ms 硬上限。");
+
+    // ② 流式读 + 报字节：这就是界面现在会显示的东西（原来只有一句「下载中…」）
+    Console.WriteLine("  --- 流式读取（界面进度条的数据来源）---");
+    using (var shttp = new HttpClient { Timeout = TimeSpan.FromMinutes(5) })
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        using var r = await shttp.GetAsync(img, HttpCompletionOption.ResponseHeadersRead, CancellationToken.None);
+        var total = r.Content.Headers.ContentLength ?? 0;
+        var samples = new List<string>();
+        long got = 0;
+        var buf = new byte[1 << 16];
+        await using var src = await r.Content.ReadAsStreamAsync(CancellationToken.None);
+        int n;
+        var lastSample = 0L;
+        while ((n = await src.ReadAsync(buf, CancellationToken.None)) > 0)
+        {
+            got += n;
+            if (total > 0 && got - lastSample >= total / 4)      // 每 25% 采一次
+            {
+                lastSample = got;
+                samples.Add($"{sw.ElapsedMilliseconds}ms {got * 100 / total}%");
+            }
+        }
+        sw.Stop();
+        Console.WriteLine($"  总长 {total} 字节，共 {sw.ElapsedMilliseconds} ms；进度采样：{string.Join(" → ", samples)}");
+        Check("站点给了 Content-Length（没有它就算不出比例，只能显示「下载中」）", total > 0, total.ToString());
+        Check("流式读取拿到的字节数与声明一致", got == total, $"{got} vs {total}");
+    }
+
+    // ③ 关键回归：请求卡死时，直连必须**自己**放弃（否则进度条就永远转 —— 用户报的现象）
+    Console.WriteLine("  --- 黑链路：验证直连不会无限等 ---");
+    using (var hhttp = new HttpClient { Timeout = TimeSpan.FromSeconds(30) })   // 故意给足 30 秒
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
+        linked.CancelAfter(ImageFetchLimits.DirectAttemptMs);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var aborted = false;
+        try
+        {
+            // 10.255.255.1 是典型的黑洞地址：连不上又不会立刻拒绝
+            await hhttp.GetAsync("http://10.255.255.1/x.jpg", HttpCompletionOption.ResponseHeadersRead, linked.Token);
+        }
+        catch (Exception e) when (e is TaskCanceledException or OperationCanceledException)
+        {
+            aborted = true;
+        }
+        catch (Exception)
+        {
+            aborted = true;      // 连接被拒之类的也算「没有无限等」
+        }
+        sw.Stop();
+        Console.WriteLine($"  黑洞地址：{sw.ElapsedMilliseconds} ms → {(aborted ? "已放弃（符合预期）" : "居然返回了？")}");
+        Check("直连卡死时会在上限内自己放弃（绝不无限等）",
+              aborted && sw.ElapsedMilliseconds <= ImageFetchLimits.DirectAttemptMs + 3000,
+              $"{sw.ElapsedMilliseconds} ms");
+    }
 }
 
 Console.WriteLine();

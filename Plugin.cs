@@ -70,6 +70,8 @@ public sealed class Plugin : IDalamudPlugin
         Jobs = new InstallQueue(Site, Penumbra, Configuration, Channel, Covers, logAdapter,
                                 Path.Combine(cacheDir, "temp"),
                                 msg => ChatGui.Print(msg));
+        // 取图过程接进「关于」页的诊断日志：这类问题必须能拿到真实过程，不能靠猜
+        Thumbs.Diag = msg => Jobs.Note(msg);
         CoverDrawer = new PenumbraCoverDrawer(PluginInterface, Configuration, Penumbra, TextureProvider, Log);
         Translator = new Translator(Configuration, Path.Combine(PluginInterface.ConfigDirectory.FullName, "translate"),
                                     msg => Log.Debug("[XmaBrowser] " + msg));

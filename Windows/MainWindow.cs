@@ -1042,6 +1042,9 @@ public class MainWindow : Window
             ImGui.SetTooltip($"{hit.Title}\n{hit.Author} · {hit.Type} · 浏览 {hit.Views}\n单击查看详情，右下角「安装到 Penumbra」安装");
     }
 
+    /// <summary>字节数显示成 MB（站点图片动辄一两 MB，用 KB 反而看不清量级）。</summary>
+    private static string MB(long bytes) => bytes <= 0 ? "?" : $"{bytes / 1048576.0:0.00} MB";
+
     /// <summary>按字符数截断（中英混排够用，不追求像素精确）。</summary>
     private static string Clip(string s, int max) => s.Length <= max ? s : s[..max] + "…";
 
@@ -1140,6 +1143,28 @@ public class MainWindow : Window
         // 这条 mod 没有预览图 → 进度到此为止（否则进度条会一直挂在「加载预览图」）
         if (d.Images.Count == 0 && _detailProgress.Running) _detailProgress.Complete();
 
+        // ⭐ 预览图救济：一张图第一次没成时**自动带通道授权重来一次**（每个 mod 只自动来一次）。
+        // 为什么需要：这张图很可能先被**列表**请求过 —— 列表只想直连（不许占通道，一页 15 张），
+        // 而 NSFW 的图直连必然 403，于是被记成失败；等详情面板来要的时候已经在冷却期里，
+        // 结果就是「进度条一直转、图出不来」，可切走再切回来又好了（主人实测到的现象）。
+        if (d.Images.Count > 0)
+        {
+            var previewFirst = d.Images[0];
+            if (!string.Equals(_previewRetryMod, d.ModId, StringComparison.Ordinal))
+            {
+                _previewRetryMod = d.ModId;
+                _previewAutoRetried = 0;
+            }
+
+            var st0 = _plugin.Thumbs.Status(previewFirst);
+            if (_previewAutoRetried == 0 && st0.StartsWith("失败", StringComparison.Ordinal))
+            {
+                _previewAutoRetried = 1;
+                _plugin.Jobs.Note($"预览图第一次没成（{st0}）→ 自动带通道授权重试一次");
+                _plugin.Thumbs.Retry(previewFirst, allowChannel: true);
+            }
+        }
+
         if (d.Images.Count > 0)
         {
             var idx = ((_previewIndex % d.Images.Count) + d.Images.Count) % d.Images.Count;
@@ -1156,20 +1181,49 @@ public class MainWindow : Window
             else
             {
                 var st = _plugin.Thumbs.Status(previewUrl);
-                if (st.StartsWith("失败", StringComparison.Ordinal))
+                var failed = st.StartsWith("失败", StringComparison.Ordinal);
+                var cachedButNotReady = !failed && st.StartsWith("已缓存", StringComparison.Ordinal);
+
+                // 全尺寸预览图是**整张大图**（本机实测一张 1496873 字节 ≈ 1.5 MB）。
+                // 下载那几秒只按「阶段」画进度的话条子纹丝不动 —— 用户看到的就是「一直在加载、没成功」。
+                var frac = _plugin.Thumbs.ImageProgress(previewUrl, out var got, out var total);
+                var line = "全尺寸预览图：" + (st.Length > 0 ? st : "准备中") +
+                           (frac >= 0f ? $"　{MB(got)} / {MB(total)}" : string.Empty);
+                ImGui.TextColored(failed ? Dim : Yellow, line);
+
+                // 先拿列表里那张小缩略图顶上（一般已经在缓存里，秒出）—— 别让人对着空白等
+                var tw = hit.ThumbUrl.Length > 0 && !string.Equals(hit.ThumbUrl, previewUrl, StringComparison.Ordinal)
+                    ? _plugin.Thumbs.Get(hit.ThumbUrl)?.GetWrapOrDefault()
+                    : null;
+                if (tw is not null) ImGui.Image(tw.Handle, Fit(tw.Size, w, S(150f)));
+
+                if (failed)
                 {
-                    ImGui.TextColored(Dim, "预览图：" + st);
+                    if (ImGui.Button("重试##prev-retry")) _plugin.Thumbs.Retry(previewUrl, allowChannel: true);
+                    ImGui.SameLine();
+                    ImGui.TextColored(Dim, "（还不行的话，到「关于」页复制诊断日志发我）");
                     if (_detailProgress.Running) _detailProgress.Fail(st);
+                }
+                else if (cachedButNotReady)
+                {
+                    // 文件已经下好了，只是纹理没就绪：绝不能把进度条一直挂着（原来就是一个死角）
+                    if (ImGui.Button("重新加载##prev-reload")) _plugin.Thumbs.Retry(previewUrl, allowChannel: true);
+                    if (_detailProgress.Running) _detailProgress.Complete();
+                }
+                else if (frac >= 0f)
+                {
+                    // 真正的字节进度
+                    ImGui.PushStyleColor(ImGuiCol.PlotHistogram, Blue);
+                    ImGui.ProgressBar(frac, new Vector2(w, S(14f)), $"{frac * 100f:0}%");
+                    ImGui.PopStyleColor();
                 }
                 else if (_detailProgress.Running)
                 {
-                    // 图还在取 → 用进度条填住这个位置（比一块空白强得多）
                     DrawLoadProgress(_detailProgress, w);
                 }
                 else
                 {
-                    ImGui.Dummy(new Vector2(w, S(30f)));
-                    if (st.Length > 0) ImGui.TextColored(Dim, "预览图：" + st);
+                    ImGui.Dummy(new Vector2(w, S(20f)));
                 }
             }
 
@@ -2514,6 +2568,9 @@ public class MainWindow : Window
     // 「插件里有没有登录态」要扫 cookie 库，不能每帧扫 —— 缓存 2 秒
     private bool _ownedLoginState;
     private DateTime _ownedLoginCheckedUtc = DateTime.MinValue;
+    // 预览图自动救济：每个 mod 视图只自动重试一次（之后交给「重试」按钮）
+    private string _previewRetryMod = string.Empty;
+    private int _previewAutoRetried;
 
     /// <summary>插件 profile 里有没有 XIVModArchive 登录态（结果缓存 2 秒，免得每帧都去扫 cookie 库）。</summary>
     private bool OwnedLoginCached()

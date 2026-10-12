@@ -3,7 +3,7 @@
     "Author": "yomo1024",
     "Name": "XMA Browser",
     "InternalName": "XmaBrowser",
-    "AssemblyVersion": "0.8.0.0",
+    "AssemblyVersion": "0.8.1.0",
     "Description": "把 XIV Mod Archive（XIVModArchive.com）搬进游戏：搜索、浏览、看详情，一键把 Mod 装进 Penumbra 并即时生效。\n公开内容直连站点；需要登录的内容（NSFW）走本机浏览器的登录态通道，用户无需在插件里做任何登录操作。\n只读站点公开数据，不修改任何本地管理器的数据。",
     "ApplicableVersion": "any",
     "RepoUrl": "https://github.com/yomo1024/XmaBrowser",
@@ -29,9 +29,9 @@
     "IconUrl": "",
     "IsHide": false,
     "IsTestingExclusive": false,
-    "LastUpdate": 1791811531,
-    "DownloadLinkInstall": "https://github.com/yomo1024/XmaBrowser/releases/download/v0.8.0/XmaBrowser-v0.8.0.zip",
-    "DownloadLinkUpdate": "https://github.com/yomo1024/XmaBrowser/releases/download/v0.8.0/XmaBrowser-v0.8.0.zip",
+    "LastUpdate": 1791816933,
+    "DownloadLinkInstall": "https://github.com/yomo1024/XmaBrowser/releases/download/v0.8.1/XmaBrowser-v0.8.1.zip",
+    "DownloadLinkUpdate": "https://github.com/yomo1024/XmaBrowser/releases/download/v0.8.1/XmaBrowser-v0.8.1.zip",
     "DownloadLinkTesting": ""
   }
 ]
