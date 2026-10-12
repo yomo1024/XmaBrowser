@@ -83,13 +83,14 @@ def main() -> int:
         })
         return e
 
-    # pluginmaster.json：给 Dalamud 用的最终清单（当前走 jsdelivr，无需 Release）
-    with open(os.path.join(out_dir, "pluginmaster.json"), "w", encoding="utf-8") as f:
+    # pluginmaster.json 放**仓库根**（Dalamud 自定义插件源直接指这个地址），zip 放 dist/
+    root_dir = ROOT
+    with open(os.path.join(root_dir, "pluginmaster.json"), "w", encoding="utf-8") as f:
         json.dump([manifest_for(cdn_url)], f, ensure_ascii=False, indent=2)
         f.write("\n")
 
     # pluginmaster-gh.json：同一个插件、下载链接换成 GitHub Release 附件（以后发 Release 用）
-    with open(os.path.join(out_dir, "pluginmaster-gh.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(root_dir, "pluginmaster-gh.json"), "w", encoding="utf-8") as f:
         json.dump([manifest_for(gh_url)], f, ensure_ascii=False, indent=2)
         f.write("\n")
 
