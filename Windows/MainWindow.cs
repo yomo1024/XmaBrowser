@@ -36,6 +36,16 @@ public class MainWindow : Window
     private readonly SearchForm _form = new();
     private readonly string[] _sortLabels = SearchForm.Sorts.Select(s => s.Label).ToArray();
 
+    // ---- 界面缩放（每帧从配置取；S() 用来把自己的像素常量一起缩）----
+    private float _s = 1f;
+    private const int UiStyleVars = 6;
+    private bool _fontScaleProbed;
+    private bool _fontScaleWorks = true;
+    private bool _fontScaleApplied;
+
+    /// <summary>按当前缩放折算一个像素值（列宽、缩略图、面板高度都用它）。</summary>
+    private float S(float value) => value * _s;
+
     // ---- 浏览状态 ----
     private List<SearchHit> _hits = [];
     private int _page = 1;
@@ -96,14 +106,76 @@ public class MainWindow : Window
         _plugin = plugin;
         _form.OnlyDtCompatible = plugin.Configuration.OnlyDtCompatible;
         _form.NsfwMode = plugin.Configuration.EffectiveNsfwMode;
+
+        // 默认开小一点、也允许缩更小（以前最小 860×560，小屏上就顶满了）
+        Size = new Vector2(1080, 640);
+        SizeCondition = ImGuiCond.FirstUseEver;
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(860, 560),
+            MinimumSize = new Vector2(UiScale.Min * 1000f, UiScale.Min * 640f),   // 700×448
             MaximumSize = new Vector2(float.MaxValue, float.MaxValue),
         };
     }
 
     public override void Draw()
+    {
+        // 界面缩放：把字体与控件一起缩，只影响本窗口（不动全局 FontGlobalScale）。
+        var pushed = PushUiScale(_plugin.Configuration.UiScale);
+        try
+        {
+            DrawContents();
+        }
+        finally
+        {
+            PopUiScale(pushed);
+        }
+    }
+
+    /// <summary>应用界面缩放：字体 + style 间距/内边距/滚动条，返回是否需要弹栈。</summary>
+    private bool PushUiScale(float scale)
+    {
+        _s = UiScale.Clamp(scale);
+        if (MathF.Abs(_s - 1f) < 0.001f) return false;
+
+        var style = ImGui.GetStyle();
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, style.ItemSpacing * _s);
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, style.FramePadding * _s);
+        ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, style.CellPadding * _s);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, style.WindowPadding * _s);
+        ImGui.PushStyleVar(ImGuiStyleVar.ScrollbarSize, style.ScrollbarSize * _s);
+        ImGui.PushStyleVar(ImGuiStyleVar.GrabMinSize, style.GrabMinSize * _s);
+
+        // 字体缩放：ImGui 1.92 起 SetWindowFontScale 进了「过时 API」，不同版本行为可能不同。
+        // 不猜 —— 开局**实测一次**：调 0.5 看 GetFontSize() 有没有跟着变。
+        if (!_fontScaleProbed)
+        {
+            _fontScaleProbed = true;
+            var before = ImGui.GetFontSize();
+            ImGui.SetWindowFontScale(0.5f);
+            _fontScaleWorks = MathF.Abs(ImGui.GetFontSize() - before * 0.5f) < 0.5f;
+            ImGui.SetWindowFontScale(1f);
+            Plugin.Log.Information(_fontScaleWorks
+                ? "[XmaBrowser] 界面缩放：SetWindowFontScale 可用（字体与控件一起缩）"
+                : "[XmaBrowser] 界面缩放：本版 ImGui 的 SetWindowFontScale 无效，只缩间距与控件尺寸（字体无法缩）");
+        }
+
+        _fontScaleApplied = _fontScaleWorks;
+        if (_fontScaleApplied) ImGui.SetWindowFontScale(_s);
+        return true;
+    }
+
+    private void PopUiScale(bool pushed)
+    {
+        if (pushed)
+        {
+            if (_fontScaleApplied) ImGui.SetWindowFontScale(1f);
+            ImGui.PopStyleVar(UiStyleVars);
+        }
+        _fontScaleApplied = false;
+        _s = 1f;
+    }
+
+    private void DrawContents()
     {
         DrawTopBar();
 
@@ -207,7 +279,7 @@ public class MainWindow : Window
         ImGui.Spacing();
 
         var avail = ImGui.GetContentRegionAvail();
-        var listWidth = MathF.Max(380f, avail.X * 0.5f);
+        var listWidth = MathF.Max(S(320f), avail.X * UiScale.ClampSplit(_plugin.Configuration.BrowseSplit));
 
         ImGui.BeginChild("xma-browse-left", new Vector2(listWidth, 0));
         if (_plugin.Configuration.GridView) DrawResultGrid();
@@ -223,18 +295,18 @@ public class MainWindow : Window
     private void DrawSearchBar()
     {
         var avail = ImGui.GetContentRegionAvail().X;
-        ImGui.SetNextItemWidth(MathF.Max(200f, avail - 330f));
+        ImGui.SetNextItemWidth(MathF.Max(S(200f), avail - S(330f)));
         ImGui.InputTextWithHint("##xma-kw", "关键词（留空 = 不看关键词）", ref _form.Text, 128);
         if (ImGui.IsItemDeactivatedAfterEdit()) StartSearch(1);
 
         ImGui.SameLine();
         ImGui.BeginDisabled(_busy);
-        if (ImGui.Button("搜索", new Vector2(90, 0))) StartSearch(1);
+        if (ImGui.Button("搜索", new Vector2(S(90f), 0))) StartSearch(1);
         ImGui.EndDisabled();
 
         ImGui.SameLine();
         var advLabel = _form.HasAdvanced ? "高级搜索 ●##xma-advbtn" : "高级搜索…##xma-advbtn";
-        if (ImGui.Button(advLabel, new Vector2(120, 0)))
+        if (ImGui.Button(advLabel, new Vector2(S(120f), 0)))
         {
             _openAdvancedRequest = true;
             _advancedOpen = true;
@@ -244,7 +316,7 @@ public class MainWindow : Window
 
         ImGui.SameLine();
         ImGui.BeginDisabled(_busy);
-        if (ImGui.Button("刷新", new Vector2(70, 0))) StartSearch(_page);
+        if (ImGui.Button("刷新", new Vector2(S(70f), 0))) StartSearch(_page);
         ImGui.EndDisabled();
 
         // 第二行：排序 / 过滤 / 翻页（不与上面挤在一起）
@@ -442,7 +514,7 @@ public class MainWindow : Window
         ImGui.Separator();
 
         var avail = ImGui.GetContentRegionAvail().X;
-        ImGui.BeginChild("xma-fav-left", new Vector2(MathF.Max(430f, avail * 0.62f), 0));
+        ImGui.BeginChild("xma-fav-left", new Vector2(MathF.Max(S(360f), avail * 0.62f), 0));
         DrawFavoriteList();
         ImGui.EndChild();
 
@@ -467,11 +539,11 @@ public class MainWindow : Window
         if (ImGui.BeginTable("xma-fav-table", 5, flags))
         {
             ImGui.TableSetupScrollFreeze(0, 1);
-            ImGui.TableSetupColumn("图", ImGuiTableColumnFlags.WidthFixed, 70);
+            ImGui.TableSetupColumn("图", ImGuiTableColumnFlags.WidthFixed, S(70f));
             ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("作者", ImGuiTableColumnFlags.WidthFixed, 110);
-            ImGui.TableSetupColumn("收藏于", ImGuiTableColumnFlags.WidthFixed, 96);
-            ImGui.TableSetupColumn("操作", ImGuiTableColumnFlags.WidthFixed, 108);
+            ImGui.TableSetupColumn("作者", ImGuiTableColumnFlags.WidthFixed, S(110f));
+            ImGui.TableSetupColumn("收藏于", ImGuiTableColumnFlags.WidthFixed, S(96f));
+            ImGui.TableSetupColumn("操作", ImGuiTableColumnFlags.WidthFixed, S(108f));
             ImGui.TableHeadersRow();
 
             // 复制一份再遍历：按钮里会改集合
@@ -482,8 +554,8 @@ public class MainWindow : Window
 
                 ImGui.TableNextColumn();
                 var wrap = _plugin.Thumbs.Get(fav.ThumbUrl)?.GetWrapOrDefault();
-                if (wrap is not null) ImGui.Image(wrap.Handle, Fit(wrap.Size, 64f, 40f));
-                else ImGui.Dummy(new Vector2(64, 40));
+                if (wrap is not null) ImGui.Image(wrap.Handle, Fit(wrap.Size, S(64f), S(40f)));
+                else ImGui.Dummy(new Vector2(S(64f), S(40f)));
 
                 ImGui.TableNextColumn();
                 var zh = cfg.ShowTranslatedTitles ? _plugin.Translator.Cached(fav.Title) : null;
@@ -591,7 +663,7 @@ public class MainWindow : Window
     {
         if (_titleBusy > 0)
         {
-            ImGui.ProgressBar(_titleTotal > 0 ? _titleDone / (float)_titleTotal : 0f, new Vector2(150, 0),
+            ImGui.ProgressBar(_titleTotal > 0 ? _titleDone / (float)_titleTotal : 0f, new Vector2(S(150f), 0),
                               $"{_titleDone}/{_titleTotal}");
             ImGui.SameLine();
             if (ImGui.Button("停止##title-tr")) _titleCts?.Cancel();
@@ -735,13 +807,13 @@ public class MainWindow : Window
         if (ImGui.BeginTable("xma-hits", 7, flags))
         {
             ImGui.TableSetupScrollFreeze(0, 1);
-            ImGui.TableSetupColumn("★", ImGuiTableColumnFlags.WidthFixed, 30);
-            ImGui.TableSetupColumn("图", ImGuiTableColumnFlags.WidthFixed, 74);
+            ImGui.TableSetupColumn("★", ImGuiTableColumnFlags.WidthFixed, S(30f));
+            ImGui.TableSetupColumn("图", ImGuiTableColumnFlags.WidthFixed, S(74f));
             ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("作者", ImGuiTableColumnFlags.WidthFixed, 116);
-            ImGui.TableSetupColumn("类型", ImGuiTableColumnFlags.WidthFixed, 92);
-            ImGui.TableSetupColumn("浏览", ImGuiTableColumnFlags.WidthFixed, 62);
-            ImGui.TableSetupColumn("标记", ImGuiTableColumnFlags.WidthFixed, 52);
+            ImGui.TableSetupColumn("作者", ImGuiTableColumnFlags.WidthFixed, S(116f));
+            ImGui.TableSetupColumn("类型", ImGuiTableColumnFlags.WidthFixed, S(92f));
+            ImGui.TableSetupColumn("浏览", ImGuiTableColumnFlags.WidthFixed, S(62f));
+            ImGui.TableSetupColumn("标记", ImGuiTableColumnFlags.WidthFixed, S(52f));
             ImGui.TableHeadersRow();
 
             foreach (var hit in hits)
@@ -751,15 +823,15 @@ public class MainWindow : Window
 
                 ImGui.TableNextColumn();
                 var isFav = FavoriteStore.IsFavorite(_plugin.Configuration.Favorites, hit.ModId);
-                if (ImGui.Button(isFav ? "★" : "☆", new Vector2(26, 0)))
+                if (ImGui.Button(isFav ? "★" : "☆", new Vector2(S(26f), 0)))
                     ToggleFavorite(hit.ModId, hit.Title, hit.Author, hit.Type, hit.ThumbUrl);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip(isFav ? "取消收藏" : "收藏（本地保存，离线可看）");
 
                 ImGui.TableNextColumn();
                 var wrap = _plugin.Thumbs.Get(hit.ThumbUrl)?.GetWrapOrDefault();
-                if (wrap is not null) ImGui.Image(wrap.Handle, Fit(wrap.Size, 68f, 42f));
-                else ImGui.Dummy(new Vector2(68, 42));
+                if (wrap is not null) ImGui.Image(wrap.Handle, Fit(wrap.Size, S(68f), S(42f)));
+                else ImGui.Dummy(new Vector2(S(68f), S(42f)));
 
                 ImGui.TableNextColumn();
                 var zhTitle = _plugin.Configuration.ShowTranslatedTitles ? _plugin.Translator.Cached(hit.Title) : null;
@@ -812,7 +884,7 @@ public class MainWindow : Window
         }
 
         var cfg = _plugin.Configuration;
-        var cardW = MathF.Max(120f, cfg.GridCardWidth * ImGui.GetIO().FontGlobalScale);
+        var cardW = MathF.Max(S(110f), cfg.GridCardWidth * _s);
         var sp = ImGui.GetStyle().ItemSpacing.X;
         var avail = ImGui.GetContentRegionAvail().X;
         var cols = Math.Max(1, (int)((avail + sp) / (cardW + sp)));
@@ -976,7 +1048,7 @@ public class MainWindow : Window
 
         ImGui.Spacing();
         ImGui.TextColored(Dim, "描述");
-        ImGui.BeginChild("xma-desc", new Vector2(0, 130), true);
+        ImGui.BeginChild("xma-desc", new Vector2(0, S(130f)), true);
         var zhDesc = _translatedDesc.Length > 0 ? _translatedDesc : _plugin.Translator.Cached(d.Description);
         if (!_showOriginal && zhDesc is { Length: > 0 } && !string.Equals(zhDesc, d.Description, StringComparison.Ordinal))
         {
@@ -1001,7 +1073,7 @@ public class MainWindow : Window
         ImGui.TextWrapped("下载：" + d.FileNameHint);
         var ok = _plugin.Penumbra.Available;
         ImGui.BeginDisabled(!ok);
-        if (ImGui.Button("安装到 Penumbra", new Vector2(180, 0)))
+        if (ImGui.Button("安装到 Penumbra", new Vector2(S(180f), 0)))
         {
             var cover = d.Images.Count > 0 ? d.Images[0] : hit.ThumbUrl;
             _plugin.Jobs.Enqueue(d, cover);
@@ -1110,11 +1182,11 @@ public class MainWindow : Window
                                      ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingFixedFit;
         if (ImGui.BeginTable("xma-jobs", 5, flags))
         {
-            ImGui.TableSetupColumn("状态", ImGuiTableColumnFlags.WidthFixed, 72);
+            ImGui.TableSetupColumn("状态", ImGuiTableColumnFlags.WidthFixed, S(72f));
             ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("进度", ImGuiTableColumnFlags.WidthFixed, 150);
+            ImGui.TableSetupColumn("进度", ImGuiTableColumnFlags.WidthFixed, S(150f));
             ImGui.TableSetupColumn("信息", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("操作", ImGuiTableColumnFlags.WidthFixed, 70);
+            ImGui.TableSetupColumn("操作", ImGuiTableColumnFlags.WidthFixed, S(70f));
             ImGui.TableHeadersRow();
 
             foreach (var job in jobs)
@@ -1216,6 +1288,52 @@ public class MainWindow : Window
 
         ImGui.BeginChild("xma-settings-scroll");
 
+        ImGui.TextColored(Blue, "界面");
+        ImGui.Separator();
+
+        // 界面缩放：字体与控件一起缩。用整数百分比，比 0.85× 这种写法直观。
+        var scalePct = (int)MathF.Round(UiScale.Clamp(cfg.UiScale) * 100f);
+        ImGui.TextUnformatted("界面缩放");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(240);
+        if (ImGui.SliderInt("##ui-scale", ref scalePct, (int)(UiScale.Min * 100), (int)(UiScale.Max * 100), "%d%%"))
+        {
+            cfg.UiScale = UiScale.Clamp(scalePct / 100f);
+            changed = true;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("字体与控件一起缩，**只影响本插件窗口**（改完立刻生效）。\n" +
+                             "想改整个游戏/Dalamud 的界面缩放，用游戏里的 /xlsettings → 界面。\n" +
+                             (_fontScaleWorks
+                                 ? "（本机实测：本版 ImGui 支持字体缩放。）"
+                                 : "⚠ 本机实测：这版 ImGui 的 SetWindowFontScale 无效，只能缩间距与控件，字体大小不变。"));
+
+        ImGui.SameLine();
+        ImGui.TextColored(Dim, $"当前 {UiScale.Describe(cfg.UiScale)}");
+        ImGui.SameLine();
+        if (ImGui.Button("恢复 100%"))
+        {
+            cfg.UiScale = UiScale.Default;
+            changed = true;
+        }
+
+        // 浏览页左右比例
+        var splitPct = (int)MathF.Round(UiScale.ClampSplit(cfg.BrowseSplit) * 100f);
+        ImGui.TextUnformatted("浏览分栏");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(240);
+        if (ImGui.SliderInt("##ui-split", ref splitPct, (int)(UiScale.MinSplit * 100), (int)(UiScale.MaxSplit * 100), "左 %d%%"))
+        {
+            cfg.BrowseSplit = UiScale.ClampSplit(splitPct / 100f);
+            changed = true;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("浏览页里左边「搜索结果」占的宽度比例，右边是详情。调小 = 详情更宽。");
+        ImGui.SameLine();
+        ImGui.TextColored(Dim, $"（{
+            ((int)MathF.Round(UiScale.ClampSplit(cfg.BrowseSplit) * 100f))}% 给结果列表）");
+
+        ImGui.Spacing();
         ImGui.TextColored(Blue, "下载与安装");
         ImGui.Separator();
         var enable = cfg.EnableOnInstall;
@@ -1641,7 +1759,7 @@ public class MainWindow : Window
                 ImGui.SetTooltip("把这份报告发给开发者即可定位（含每一步的调用结果与读回路径）。");
             ImGui.SameLine();
             ImGui.TextColored(Dim, "自检报告（复制给我）");
-            ImGui.BeginChild("xma-diag-report", new Vector2(0, 130), true);
+            ImGui.BeginChild("xma-diag-report", new Vector2(0, S(130f)), true);
             ImGui.TextWrapped(_diagReport);
             ImGui.EndChild();
         }
@@ -1666,7 +1784,7 @@ public class MainWindow : Window
                 ImGui.SetClipboardText(_nsfwReport);
             ImGui.SameLine();
             ImGui.TextColored(Dim, "把这份发我");
-            ImGui.BeginChild("xma-nsfw-report", new Vector2(0, 170), true);
+            ImGui.BeginChild("xma-nsfw-report", new Vector2(0, S(170f)), true);
             ImGui.TextWrapped(_nsfwReport);
             ImGui.EndChild();
         }
@@ -1711,9 +1829,12 @@ public class MainWindow : Window
             _openAdvancedRequest = false;
         }
 
-        ImGui.SetNextWindowSize(new Vector2(520, 0), ImGuiCond.Appearing);
+        ImGui.SetNextWindowSize(new Vector2(S(520f), 0), ImGuiCond.Appearing);
         if (!ImGui.BeginPopupModal(AdvancedId, ref _advancedOpen, ImGuiWindowFlags.AlwaysAutoResize))
             return;
+
+        // 弹窗是**独立窗口**：style 间距随主窗口一起缩了，但字体缩放是「每窗口」的，要再设一次。
+        if (MathF.Abs(_s - 1f) > 0.001f) ImGui.SetWindowFontScale(_s);
 
         ImGui.TextColored(Dim, "留空 = 不看这个条件（除「关键词」外都是站点的精确检索项）");
         ImGui.Separator();

@@ -176,6 +176,17 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
     /// <summary>下载完成/失败是否在聊天框提示。</summary>
     public bool NotifyInChat { get; set; } = true;
 
+    // ---------------- 界面 ----------------
+
+    /// <summary>
+    /// 界面缩放（0.70–1.50）：字体与控件一起缩，只影响本插件窗口。
+    /// （真正的「全局界面缩放」是 Dalamud 的设置：/xlsettings → 界面。）
+    /// </summary>
+    public float UiScale { get; set; } = 1f;
+
+    /// <summary>浏览页左右分栏比例（左边结果列表占的宽度，0.25–0.75）。</summary>
+    public float BrowseSplit { get; set; } = 0.5f;
+
     // ---------------- 收藏 / 关注（全部存本地，不依赖站点登录）----------------
 
     /// <summary>收藏的 Mod（新的在前）。</summary>

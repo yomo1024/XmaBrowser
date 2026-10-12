@@ -11,6 +11,7 @@ using XmaBrowser.Favorites;
 using XmaBrowser.Install;
 using XmaBrowser.Site;
 using XmaBrowser.Translate;
+using XmaBrowser.Ui;
 
 // 站点层 / 包解析层 / 浏览器通道的无游戏自测。
 //   离线：dotnet run -c Release                  （用 samples/ 里的真实 HTML，不联网）
@@ -496,6 +497,24 @@ Console.WriteLine("=== 13d. 收藏 / 关注（本地逻辑，不联网）===");
     var hit = new SearchHit { ModId = "777", Title = "T", Author = "A", Type = "Gear", ThumbUrl = "u" };
     var fromHit = FavoriteStore.FromHit(hit);
     Check("FromHit 带上 id/标题/图", fromHit.ModId == "777" && fromHit.Title == "T" && fromHit.ThumbUrl == "u");
+}
+
+Console.WriteLine();
+Console.WriteLine("=== 13e. 界面缩放取值规则 ===");
+{
+    Check("默认 100%（UiScale.Default = 1）", UiScale.Default == 1f && UiScale.Clamp(1f) == 1f);
+    Check("低于下限抬到 70%", UiScale.Clamp(0.3f) == UiScale.Min, UiScale.Clamp(0.3f).ToString("0.00"));
+    Check("高于上限压到 150%", UiScale.Clamp(9f) == UiScale.Max, UiScale.Clamp(9f).ToString("0.00"));
+    Check("NaN / 无穷回落到默认",
+          UiScale.Clamp(float.NaN) == UiScale.Default && UiScale.Clamp(float.PositiveInfinity) == UiScale.Default);
+    Check("区间内的 85% 原样通过", Math.Abs(UiScale.Clamp(0.85f) - 0.85f) < 1e-6f);
+    Check("两边界值本身合法", UiScale.Clamp(UiScale.Min) == UiScale.Min && UiScale.Clamp(UiScale.Max) == UiScale.Max);
+    Check("百分比描述", UiScale.Describe(0.85f) == "85%" && UiScale.Describe(1f) == "100%",
+          UiScale.Describe(0.85f));
+    Check("分栏默认 50%", UiScale.DefaultSplit == 0.5f && UiScale.ClampSplit(0.5f) == 0.5f);
+    Check("分栏越界被钳到 25%/75%",
+          UiScale.ClampSplit(0f) == UiScale.MinSplit && UiScale.ClampSplit(1f) == UiScale.MaxSplit);
+    Check("分栏 NaN 回落默认", UiScale.ClampSplit(float.NaN) == UiScale.DefaultSplit);
 }
 
 Console.WriteLine();
