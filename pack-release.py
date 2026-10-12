@@ -26,6 +26,31 @@ BRANCH = "main"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
+def purge_jsdelivr(paths: list[str], tries: int = 3) -> None:
+    """发布后主动刷新 jsdelivr 缓存。
+
+    为什么必须做：jsdelivr 对**从没见过的新路径**会先返回负缓存 404
+    （实测报 "Couldn't find the requested file"），主人第一次加源就是这样失败的；
+    已缓存过的路径也会继续给旧内容。purge 一次就正常。
+    """
+    import time
+    import urllib.request
+
+    for p in paths:
+        url = "https://purge.jsdelivr.net/gh/%s@%s%s" % (REPO, BRANCH, p)
+        for i in range(tries):
+            try:
+                with urllib.request.urlopen(url, timeout=20) as r:
+                    if r.status == 200:
+                        print("jsdelivr 缓存已刷新：%s" % p)
+                        break
+            except Exception as e:
+                if i == tries - 1:
+                    print("jsdelivr 刷新失败（不影响发布，等自然过期）：%s -> %s" % (p, str(e)[:60]))
+                else:
+                    time.sleep(3)
+
+
 def find_manifest(bin_dir: str) -> str:
     for name in os.listdir(bin_dir):
         if name.endswith(".json") and not name.endswith(".deps.json"):
@@ -91,27 +116,32 @@ def main() -> int:
         })
         return e
 
-    # 主源用 raw.githubusercontent —— 与主人「已在用的」ModBridge 仓库同一套路（那份清单就是走 raw），
-    # 且没有 jsdelivr 对新建仓库的「负缓存 404」问题（实测踩过：新提交后 jsdelivr 曾返回
-    # "Couldn't find the requested file"，必须手动 purge 才恢复）。
-    # jsdelivr 作为备选源（国内多数网络更快，但对新路径要 purge 才即时生效）。
+    # 主源用 jsdelivr：本机实测 raw.githubusercontent 会被线路重置（Recv failure: Connection was reset），
+    # 而 jsdelivr 稳定；它唯一的坑是「新建仓库的新路径会先返回负缓存 404」—— 见文件末尾的 purge，
+    # 每次发布都主动刷一次，这个坑就没了。raw 版清单作为备用源。
     for fname, link, host in (
-        ("pluginmaster.json",     raw_url, "raw.githubusercontent（主）"),
-        ("pluginmaster-cdn.json", cdn_url, "jsdelivr（备选）"),
+        ("pluginmaster.json",     cdn_url, "jsdelivr（主，发布后自动 purge）"),
+        ("pluginmaster-cdn.json", cdn_url, "jsdelivr（同一份，兼容早先发出去的地址）"),
+        ("pluginmaster-raw.json", raw_url, "raw.githubusercontent（备用源）"),
         ("pluginmaster-gh.json",  gh_url,  "GitHub Release 附件（以后发 Release 用）"),
     ):
         with open(os.path.join(ROOT, fname), "w", encoding="utf-8") as f:
             json.dump([manifest_for(link)], f, ensure_ascii=False, indent=2)
             f.write("\n")
 
+    # 发布后自动刷新 jsdelivr 缓存（否则新路径可能 404 或仍给旧版；实测踩过）
+    purge_jsdelivr(["/pluginmaster.json", "/dist/" + zip_name])
+
     size_mb = os.path.getsize(zip_path) / 1048576.0
     print("插件：%s v%s（API %s）" % (manifest["Name"], ver3, manifest["DalamudApiLevel"]))
     print("zip ：%s  （%.2f MB，来自 %s）" % (zip_name, size_mb, source))
-    print("清单：pluginmaster.json（主，raw）/ pluginmaster-cdn.json（备，jsdelivr）/ pluginmaster-gh.json（Release）")
+    print("清单：pluginmaster.json（主）/ pluginmaster-raw.json（备）/ pluginmaster-gh.json（Release）")
     print("Dalamud 自定义插件源 —— 主地址（粘这个）：")
-    print("   https://raw.githubusercontent.com/%s/%s/pluginmaster.json" % (REPO, BRANCH))
-    print("备选（主地址不通时）：")
-    print("   https://cdn.jsdelivr.net/gh/%s@%s/pluginmaster-cdn.json" % (REPO, BRANCH))
+    print("   https://cdn.jsdelivr.net/gh/%s@%s/pluginmaster.json" % (REPO, BRANCH))
+    print("主地址不通时用备用（下载走 raw）：")
+    print("   https://cdn.jsdelivr.net/gh/%s@%s/pluginmaster-raw.json" % (REPO, BRANCH))
+    print("若 raw 也不通，可换回直连 raw 的清单：")
+    print("   https://raw.githubusercontent.com/%s/%s/pluginmaster-raw.json" % (REPO, BRANCH))
 
     # 自检：zip 里必须能读到清单，且 InternalName/版本对得上
     with zipfile.ZipFile(zip_path) as z:
