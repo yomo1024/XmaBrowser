@@ -1,0 +1,146 @@
+# XMA Browser —— 在游戏里逛 XIV Mod Archive
+
+把一个 Dalamud 插件装进游戏，**在游戏内搜索/浏览 XIVModArchive，点一下就把 Mod 装进 Penumbra 并即时生效**。
+不再需要切出游戏 → 开管理器网页 → 点安装 → 回游戏确认。
+
+> 与「FFXIV XMA Manager」三件套**互不依赖**：这是独立插件，不读写管理器的数据，也不需要管理器在运行。
+
+---
+
+## 功能
+
+| 功能 | 说明 |
+|---|---|
+| 搜索 / 浏览 | 关键词、排序（最新发布 / 最近更新 / 今日最多浏览）、仅当前版本兼容、翻页 |
+| 详情 | 大图轮播（可切图）、作者、类型、标签、影响/替换、种族/性别、更新时间、描述 |
+| 一键安装 | 下载 → 解析包 → 装进 Penumbra → （可选）在当前集合启用 → 重绘立刻可见 |
+| 安装队列 | 进度、取消、失败原因；串行执行（礼貌抓站） |
+| 缩略图 | 列表缩略图 + 详情大图，磁盘缓存可配上限、自动淘汰最久未用 |
+| 设置 | 装完是否自动启用/重绘/删包、请求间隔、缓存目录、浏览器通道、缩略图上限 |
+
+命令：`/xma` 打开窗口。
+
+---
+
+## 两条通道（这是本插件最关键的设计）
+
+实测结论（本机验证，不是推测）：
+
+| 内容 | 直连 HttpClient | 浏览器通道 |
+|---|---|---|
+| 公开（SFW）搜索 / 详情 | ✅ 200 | — |
+| 公开（SFW）下载 | ✅ 206 + PK 头 | — |
+| **NSFW 详情页** | ❌ 403 | ✅ 200 |
+| **NSFW 下载** | ❌ 404 | ✅ 实测拿到 30.8 MB 的 `.ttmp2`（PK 头） |
+
+也就是说：**NSFW 卡的不是"登录/cookie"，而是 Cloudflare 认不认你是浏览器**。
+所以：
+
+- **公开内容**走直连 HttpClient（快、有进度、可取消）
+- **NSFW 等需要登录态的内容**交给**本机浏览器**去取 —— 你**不需要在插件里做任何登录操作**
+
+### 浏览器通道怎么工作（以及它的边界）
+
+1. 找到本机已安装的浏览器（Chrome / Edge / CentBrowser / Brave）里**已登录过 XIVModArchive** 的那个；
+2. 把它的 `Cookies` + `Local State` **复制**到插件自己的临时 profile（浏览器开着也能复制）；
+3. 用**同一个浏览器 exe** 起一个 `--headless=new` 实例（无窗口），通过 CDP 让浏览器自己去取页面 / 下载文件；
+4. 用完关掉进程，按设置**删除临时 profile（里面有 cookie 副本）**。
+
+为什么不让插件自己解密 cookie：Chrome 127+ 起 cookie 是 **App-Bound 加密（v20）**，外部程序用 DPAPI 解密必然失败（实测 `InvalidTag`）。走"复制 profile + 同 exe 启动"就是让**浏览器替我们解密**，我们只通过 CDP 读结果。
+
+**边界**：如果浏览器里从没登录过 XMA，NSFW 自然取不到（这时插件会明确告诉你）。
+
+---
+
+## 安装
+
+### 方式一：开发者插件（本地）
+
+把 `bin/Release/` 整个目录拷到：
+
+```
+%APPDATA%\XIVLauncher\devPlugins\XmaBrowser\
+```
+
+（区域版启动器是 `XIVLauncherCN`）然后 `/xlplugins` → Dev Plugins → 启用 **XMA Browser**。
+
+### 方式二：自定义插件源（推荐，能在线更新）
+
+Dalamud → 设置 → 实验性 → **自定义插件源** → 粘贴：
+
+```
+https://cdn.jsdelivr.net/gh/yomo1024/XmaBrowser@main/pluginmaster.json
+```
+
+（jsdelivr 没缓存时用备用地址：`https://raw.githubusercontent.com/yomo1024/XmaBrowser/main/pluginmaster.json`）
+然后在插件列表里搜 **XMA Browser** 安装即可。
+
+> 下载链接走 jsdelivr 指向仓库内 `dist/` 里的 zip —— 所以**不发 GitHub Release 也能在线更新**；
+> 想改走 Release 附件时，把源换成 `dist/pluginmaster-gh.json` 即可（需先建对应 Release）。
+
+---
+
+## 已知限制
+
+- **外链 Mod 不能一键装**：作者把文件放在 Patreon / 自己的站点时没有直链，插件只能「在浏览器打开」。
+- **`.7z` / `.rar` 不支持**：XMA 上极少；zip 与 .pmp/.ttmp2 全支持（zip 里是松散文件时，插件会解到 Penumbra 的 mod 目录并 `AddMod` 登记，不自己伪造 .pmp 格式）。
+- **站点改版会让解析失效**：解析层有真实 HTML 样本的回归测试，改版时先看哪条断言挂了。
+- 站点同一页固定 15 条，翻页用站点的 `page` 参数。
+
+---
+
+## 开发 / 构建 / 测试
+
+```bash
+# 构建（本机没装游戏也能编；DALAMUD_HOME 指向 Dalamud dev 引用库）
+export DALAMUD_HOME='E:\Hermes\dalamud-dev'
+dotnet build -c Release XmaBrowser.csproj          # 验收口径：0 警告 0 错误
+
+# 无游戏自测（解析层用真实 HTML 样本 + 包解析，不联网）
+cd tests/SiteTests && dotnet run -c Release
+
+# 联网实测：SFW 直连 + NSFW 浏览器通道 + 真实下载
+cd tests/SiteTests && dotnet run -c Release -- live
+```
+
+测试项目**直接 Include 插件的源码**（`Site/`、`Install/PackageResolver.cs`、`Browser/`），所以测的就是真东西；
+站点层与浏览器通道都通过窄接口（`IXmaSettings` / `IBrowserSettings` / `IXmaLog`）与 Dalamud 解耦，才能脱离游戏跑。
+
+### 目录
+
+```
+XmaBrowser/
+  Plugin.cs                 生命周期、/xma 命令、组件接线
+  Configuration.cs          设置（实现 IXmaSettings / IBrowserSettings）
+  Site/                     站点层（不依赖 Dalamud，可单测）
+    XmaClient.cs            HTTP（含实测过的请求头配方）、节流、下载（带进度）
+    XmaParser.cs            页面解析（选择器都照着真实 DOM 写）
+    XmaModels.cs            模型 + 搜索 URL 拼装 + 时间解析
+  Install/
+    PenumbraBridge.cs       Penumbra IPC 封装（类型化订阅器，全部切 framework 线程）
+    PackageResolver.cs      包解析：内层 .pmp/.ttmp2 → InstallMod；松散文件 → AddMod（含 Zip Slip 防护）
+    InstallQueue.cs         安装队列：下载 → 解析 → 安装 → 启用 → 重绘
+  Browser/                  浏览器通道（不依赖 Dalamud，可单测）
+    BrowserChannel.cs       借 profile + headless 启动 + 取页面/下载
+    CdpClient.cs            极简 CDP 客户端（ClientWebSocket）
+  Ui/ThumbCache.cs          缩略图磁盘缓存 + 纹理缓存 + 淘汰
+  Windows/MainWindow.cs     游戏内界面
+  tests/SiteTests/          无游戏自测（含 samples/ 真实 HTML 样本）
+```
+
+---
+
+## 隐私与安全
+
+- 插件只**读**站点公开数据；除下载 Mod 包外不向站点发送任何内容。
+- 浏览器通道复制的是**你本机浏览器自己的** cookie 文件，只用于让浏览器取 NSFW 内容；
+  **不会被插件上传、不会被写入日志**（代码里没有打印 cookie 的地方）。
+- 临时 profile 默认用完即删（设置里可关）。
+- 全流程不回传任何数据到第三方。
+
+## 许可与致谢
+
+清洁室实现：接口配方（搜索参数、下载链接选择器、`/private/` 直链形态）来自对站点的公开实测，
+未复制 `Noevain/ModArchiveBrowser`（AGPL-3.0）的代码。
+
+感谢 Penumbra、Dalamud、XIVModArchive 以及它们各自的作者。

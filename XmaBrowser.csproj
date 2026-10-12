@@ -1,0 +1,31 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Author>yomo1024</Author>
+    <Name>XMA Browser</Name>
+    <Punchline>在游戏里逛 XIV Mod Archive，点一下就装进 Penumbra。</Punchline>
+    <Description>把 XIV Mod Archive（XIVModArchive.com）搬进游戏：搜索、浏览、看详情，一键把 Mod 装进 Penumbra 并即时生效。
+公开内容直连站点；需要登录的内容（NSFW）走本机浏览器的登录态通道，用户无需在插件里做任何登录操作。
+只读站点公开数据，不修改任何本地管理器的数据。</Description>
+    <RepoUrl>https://github.com/yomo1024/XmaBrowser</RepoUrl>
+    <Tags>mods;penumbra;xivmodarchive;browser;xma;mod-manager</Tags>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- tests/ 是独立的控制台测试项目，不属于插件本体 -->
+    <Compile Remove="tests\**" />
+    <None Remove="tests\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Penumbra 类型化 IPC：直接 new Xxx(pi).Invoke(...)，不手写 IPC 字符串 -->
+    <PackageReference Include="Penumbra.Api" Version="5.19.2" />
+    <!-- HTML 解析（纯托管）。刻意不引 SharpCompress：0.38.0 有已知漏洞告警，而 XMA 上 .7z/.rar 极少，
+         zip 走 .NET 内置 System.IO.Compression -->
+    <PackageReference Include="HtmlAgilityPack" Version="1.11.65" />
+  </ItemGroup>
+
+</Project>

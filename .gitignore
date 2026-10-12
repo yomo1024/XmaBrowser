@@ -1,0 +1,14 @@
+# 构建产物（不要提交；dist/ 里的发布包是刻意提交的）
+bin/
+obj/
+*.user
+.vs/
+__pycache__/
+
+# 发布包留在 dist/ 里（插件源走 jsdelivr 需要它可下载）
+!dist/
+!dist/*.zip
+!dist/pluginmaster*.json
+
+# 本地临时
+*.log

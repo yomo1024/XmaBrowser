@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>SiteTests</AssemblyName>
+    <RootNamespace>SiteTests</RootNamespace>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="HtmlAgilityPack" Version="1.11.65" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 直接编译插件的源码：测的就是真东西，且不需要 Dalamud / 不需要游戏。
+         同一份代码既跑离线断言（不用网），也能加 live 参数跑联网实测。 -->
+    <Compile Include="..\..\Site\IXmaLog.cs" />
+    <Compile Include="..\..\Site\IXmaSettings.cs" />
+    <Compile Include="..\..\Site\XmaModels.cs" />
+    <Compile Include="..\..\Site\XmaParser.cs" />
+    <Compile Include="..\..\Site\XmaClient.cs" />
+    <Compile Include="..\..\Install\PackageResolver.cs" />
+    <Compile Include="..\..\Browser\IBrowserSettings.cs" />
+    <Compile Include="..\..\Browser\CdpClient.cs" />
+    <Compile Include="..\..\Browser\BrowserChannel.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="samples\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
