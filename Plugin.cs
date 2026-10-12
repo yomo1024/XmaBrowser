@@ -72,6 +72,11 @@ public sealed class Plugin : IDalamudPlugin
                                 msg => ChatGui.Print(msg));
         // 取图过程接进「关于」页的诊断日志：这类问题必须能拿到真实过程，不能靠猜
         Thumbs.Diag = msg => Jobs.Note(msg);
+        // 通道每一步的耗时也进同一份日志（"卡在哪一段"要能直接看出来）
+        Channel.Diag = msg => Jobs.Note(msg);
+        // 日志同时落盘，方便主人直接把文件发过来
+        Jobs.DiagFile = Path.Combine(PluginInterface.ConfigDirectory.FullName, "logs",
+                                     $"diag-{DateTime.Now:yyyyMMdd}.log");
         CoverDrawer = new PenumbraCoverDrawer(PluginInterface, Configuration, Penumbra, TextureProvider, Log);
         Translator = new Translator(Configuration, Path.Combine(PluginInterface.ConfigDirectory.FullName, "translate"),
                                     msg => Log.Debug("[XmaBrowser] " + msg));

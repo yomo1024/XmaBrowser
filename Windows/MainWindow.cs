@@ -1045,6 +1045,21 @@ public class MainWindow : Window
     /// <summary>字节数显示成 MB（站点图片动辄一两 MB，用 KB 反而看不清量级）。</summary>
     private static string MB(long bytes) => bytes <= 0 ? "?" : $"{bytes / 1048576.0:0.00} MB";
 
+    /// <summary>在资源管理器里打开一个文件夹（诊断日志用）。</summary>
+    private static void OpenFolder(string dir)
+    {
+        try
+        {
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = dir,
+                UseShellExecute = true,
+            });
+        }
+        catch { /* 打不开就算了，不影响功能 */ }
+    }
+
     /// <summary>按字符数截断（中英混排够用，不追求像素精确）。</summary>
     private static string Clip(string s, int max) => s.Length <= max ? s : s[..max] + "…";
 
@@ -1074,7 +1089,10 @@ public class MainWindow : Window
             return;
         }
 
-        if (_detailBusy)
+        // ⭐ 「已经加载好但不显示」的结构性修复：
+        //    原来只要 _detailBusy 为真就一律不画数据 —— 哪怕 _detail 早就填好了。
+        //    现在**有数据就画数据**：忙标志只在「数据还没到」时才有资格占屏。
+        if (_detailBusy && _detail is null)
         {
             ImGui.TextColored(Yellow, $"正在读取 {hit.ModId} 的详情…");
 
@@ -1154,6 +1172,8 @@ public class MainWindow : Window
             {
                 _previewRetryMod = d.ModId;
                 _previewAutoRetried = 0;
+                _previewTextureReloads = 0;
+                _previewReadySince = DateTime.UtcNow;
             }
 
             var st0 = _plugin.Thumbs.Status(previewFirst);
@@ -1206,9 +1226,29 @@ public class MainWindow : Window
                 }
                 else if (cachedButNotReady)
                 {
-                    // 文件已经下好了，只是纹理没就绪：绝不能把进度条一直挂着（原来就是一个死角）
-                    if (ImGui.Button("重新加载##prev-reload")) _plugin.Thumbs.Retry(previewUrl, allowChannel: true);
-                    if (_detailProgress.Running) _detailProgress.Complete();
+                    // ⭐ 主人猜的就是这个状态：**文件其实已经在本地了，只是没显示出来**。
+                    //    处理：自动重挂一次纹理（**不重下**那 1.4 MB）；等了 8 秒还没就绪
+                    //    就明确报出来 + 给按钮，绝不留一个转不完的进度条。
+                    var waitedMs = (long)(DateTime.UtcNow - _previewReadySince).TotalMilliseconds;
+                    if (_previewTextureReloads == 0 && waitedMs > 1200)
+                    {
+                        _previewTextureReloads = 1;
+                        _plugin.Jobs.Note($"预览图文件已在本地但纹理没就绪 → 自动重挂纹理：{previewUrl}");
+                        _plugin.Thumbs.ReloadTexture(previewUrl);
+                    }
+
+                    if (_previewTextureReloads > 0 && waitedMs > 8000)
+                    {
+                        ImGui.TextColored(Dim, "预览图：文件已在本地，但纹理一直没就绪（可以重挂试试）");
+                        ImGui.SameLine();
+                        if (ImGui.Button("重新加载##prev-reload")) _plugin.Thumbs.ReloadTexture(previewUrl);
+                        if (_detailProgress.Running) _detailProgress.Fail("纹理没就绪（文件已在本地）");
+                    }
+                    else
+                    {
+                        ImGui.TextColored(Dim, "预览图：已下载到本地，正在准备显示…");
+                        if (_detailProgress.Running) _detailProgress.SetNote("准备显示预览图");
+                    }
                 }
                 else if (frac >= 0f)
                 {
@@ -1824,9 +1864,10 @@ public class MainWindow : Window
             changed = true;
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("插件只读页面的 DOM（卡片/标题/下载链接），广告与统计脚本纯粹是拖慢加载，\n" +
-                             "而且会把页面「加载完成」推到好几秒之后。屏蔽后 DOM 该有的还在，页面早得多稳下来。\n" +
-                             "万一某个页面因此少了内容，把这个关掉即可。");
+            ImGui.SetTooltip("插件只读页面的 DOM（卡片/标题/下载链接），广告与统计脚本对它没用处，\n" +
+                             "屏蔽掉能少发一堆请求、省点流量。\n" +
+                             "⚠ 实测对「页面就绪时间」没有明显影响（5594 ms vs 5785 ms，噪声内）——\n" +
+                             "所以别指望它提速；真正让加载变快的是浏览器预热与缓存。");
 
         ImGui.SameLine();
         var idle = cfg.ChannelIdleMinutes;
@@ -2080,6 +2121,15 @@ public class MainWindow : Window
         if (ImGui.Button("复制全部（报告+日志）"))
             ImGui.SetClipboardText(_diagReport + "\n---- 日志 ----\n" + string.Join("\n", diagLog));
         ImGui.SameLine();
+        if (ImGui.Button("打开日志文件夹"))
+        {
+            var dir = _plugin.Jobs.DiagDirectory;
+            if (dir.Length > 0) OpenFolder(dir);
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("诊断日志同时写在文件里（" + _plugin.Jobs.DiagFile + "）——\n" +
+                             "远程排查时直接把那个文件发我就行，里面有每一步的耗时。");
+        ImGui.SameLine();
         ImGui.TextColored(Dim, $"诊断日志（最近 {diagLog.Count} 条；同样的内容也在 /xllog 里）");
 
         ImGui.BeginChild("xma-diag-log", new Vector2(0, 150), true);
@@ -2210,6 +2260,8 @@ public class MainWindow : Window
         _jumpPage = page;
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
+        // 搜索也加总看门狗：到点就放弃并说明，别让人无限等
+        _cts.CancelAfter(TimeSpan.FromSeconds(FetchLimits.SearchTimeoutSeconds));
         var ct = _cts.Token;
 
         _busy = true;
@@ -2344,8 +2396,8 @@ public class MainWindow : Window
             }
             catch (OperationCanceledException)
             {
-                _status = "已取消";
-                _searchProgress.Fail("已取消");
+                _status = $"已取消或超时（超过 {FetchLimits.SearchTimeoutSeconds} 秒）";
+                _searchProgress.Fail(_status);
             }
             catch (Exception e)
             {
@@ -2366,6 +2418,13 @@ public class MainWindow : Window
         _detail = null;
         _detailViaChannel = false;
         _error = string.Empty;
+
+        // ⭐ 整条详情的**总看门狗**：到点就放弃并把原因写出来。
+        // 没有它的时候，会话启动 + 重试相乘可以拖到一分钟，用户只能盯着不动的进度条 ——
+        // 「加载了 1 分钟还没出来、切换一下秒开（走缓存）」就是这么来的。
+        _detailCts?.Cancel();
+        _detailCts = new CancellationTokenSource(TimeSpan.FromSeconds(FetchLimits.DetailTimeoutSeconds));
+        var detailCt = _detailCts.Token;
 
         // 换了一条 Mod：把上一条的翻译清掉（正在跑的那个也取消）
         _transCts?.Cancel();
@@ -2429,7 +2488,7 @@ public class MainWindow : Window
                 var dSw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
-                    var parsed = await client.DetailAsync(modId).ConfigureAwait(false);
+                    var parsed = await client.DetailAsync(modId, detailCt).ConfigureAwait(false);
                     dSw.Stop();
 
                     if (parsed.Title.Length > 0 && (parsed.DownloadHref.Length > 0 || !canFallBack))
@@ -2454,6 +2513,18 @@ public class MainWindow : Window
                         _needsLogin.Mark(modId, DateTime.UtcNow);   // 这条 mod 需要登录态，下次别再白撞
                     _plugin.Jobs.Note($"详情直连被拒（{denied.Reason}，{dSw.ElapsedMilliseconds} ms）→ 改走浏览器通道");
                 }
+                catch (OperationCanceledException)
+                {
+                    // 直连被总看门狗掐掉：别让它把整条流程带崩，往下交给统一的收尾处理
+                    _plugin.Jobs.Note($"详情直连被取消/超时（{dSw.ElapsedMilliseconds} ms）");
+                }
+                catch (Exception e)
+                {
+                    // ⭐ 必须兜住**所有**异常类型：这里逃出去一个异常，就不会走到下面那个
+                    //    finally，_detailBusy 会永远停在 true —— 界面就永远显示「正在读取…」，
+                    //    而用户看到的就是「第一次一直转、第二次打开才出来」。
+                    _plugin.Jobs.Note($"详情直连出错（{e.GetType().Name}，{dSw.ElapsedMilliseconds} ms）→ 改走浏览器通道");
+                }
             }
             else
             {
@@ -2470,7 +2541,7 @@ public class MainWindow : Window
                 try
                 {
                     _detailProgress.Enter(1, "准备浏览器");
-                    var html = await channel.GetHtmlAsync(pageUrl).ConfigureAwait(false);
+                    var html = await channel.GetHtmlAsync(pageUrl, detailCt).ConfigureAwait(false);
                     cSw.Stop();
                     _detailProgress.Enter(2, "浏览器通道");
                     if (html is { Length: > 0 } htmlOk)
@@ -2499,7 +2570,7 @@ public class MainWindow : Window
             try
             {
                 _detailProgress.Enter(2, "直连");
-                _detail = await client.DetailAsync(modId).ConfigureAwait(false);
+                _detail = await client.DetailAsync(modId, detailCt).ConfigureAwait(false);
                 if (_detail.Title.Length > 0 || _detail.DownloadHref.Length > 0)
                 {
                     _detailProgress.Enter(3, "预览图");
@@ -2511,7 +2582,7 @@ public class MainWindow : Window
                 try
                 {
                     _detailProgress.Enter(1, "准备浏览器");
-                    var html = await channel.GetHtmlAsync(pageUrl).ConfigureAwait(false);
+                    var html = await channel.GetHtmlAsync(pageUrl, detailCt).ConfigureAwait(false);
                     if (html is null || html.Length == 0)
                     {
                         _error = "浏览器通道也没取到页面：" + channel.LastError;
@@ -2542,6 +2613,11 @@ public class MainWindow : Window
                     ? "（可在「设置」里开启浏览器通道）"
                     : "（「直连被拒时自动走浏览器通道」在设置里是关掉的）");
             }
+            catch (OperationCanceledException)
+            {
+                _error = $"读详情超过 {FetchLimits.DetailTimeoutSeconds} 秒就放弃了（哪一段慢见「关于」页的诊断日志，也可以点重试）。";
+                _plugin.Jobs.Note($"详情超时：{modId} —— {FetchLimits.DetailTimeoutSeconds} 秒预算用尽，已放弃");
+            }
             catch (Exception e)
             {
                 _error = $"读详情失败：{e.GetType().Name}: {e.Message}";
@@ -2556,6 +2632,7 @@ public class MainWindow : Window
         });
     }
 
+    private CancellationTokenSource? _detailCts;
     private bool _detailViaChannel;
     private string _detailChannelReason = string.Empty;
     // 详情短期缓存 + 「这条 mod 需要登录态」记忆（都是纯逻辑类，能离线自测）
@@ -2571,6 +2648,9 @@ public class MainWindow : Window
     // 预览图自动救济：每个 mod 视图只自动重试一次（之后交给「重试」按钮）
     private string _previewRetryMod = string.Empty;
     private int _previewAutoRetried;
+    // 「文件已在本地但纹理没就绪」的自动重挂（每个 mod 只一次）
+    private int _previewTextureReloads;
+    private DateTime _previewReadySince = DateTime.MinValue;
 
     /// <summary>插件 profile 里有没有 XIVModArchive 登录态（结果缓存 2 秒，免得每帧都去扫 cookie 库）。</summary>
     private bool OwnedLoginCached()

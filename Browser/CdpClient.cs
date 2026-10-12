@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using XmaBrowser.Site;
 
 namespace XmaBrowser.Browser;
 
@@ -54,7 +55,7 @@ internal sealed class CdpClient : IDisposable
     }
 
     public async Task<JsonElement> SendAsync(string method, object? parameters, CancellationToken ct,
-                                             int timeoutMs = 60_000)
+                                             int timeoutMs = FetchLimits.CdpCallMs)
     {
         if (!IsOpen)
             throw new CdpClosedException("CDP 连接不可用（连接已关闭或已被释放）");

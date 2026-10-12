@@ -41,8 +41,9 @@ public sealed class ThumbCache : IDisposable
     /// 原来失败是永久记住的 —— NSFW 的图第一次直连 403 之后，就再也取不到了。</summary>
     public const int FailureCooldownSeconds = ImageFetchLimits.FailureCooldownSeconds;
 
-    /// <summary>直连尝试的单独超时（毫秒）。不能用 HttpClient 的 30 分钟 —— 那等于没有上限。</summary>
-    public const int DirectAttemptMs = ImageFetchLimits.DirectAttemptMs;
+    /// <summary>**停滞**上限（毫秒）：多久没有新字节就判定卡住（不是"总时长"）。
+    /// 每读到数据就重置 —— 见 FetchLimits.ImageStallMs 里的踩坑记录。</summary>
+    public const int StallMs = ImageFetchLimits.StallMs;
 
     /// <summary>一张图的整条任务上限（毫秒）：直连 + 通道加起来超过这个数就报失败原因，绝不无限转。</summary>
     public const int JobTimeoutMs = ImageFetchLimits.JobTimeoutMs;
@@ -113,6 +114,20 @@ public sealed class ThumbCache : IDisposable
             Fail(url, "缓存文件读不出（已删除，等会重试）");
             return null;
         }
+    }
+
+    /// <summary>
+    /// 只重挂纹理，**文件不动**。
+    ///
+    /// 用于「文件已经在本地了，但纹理拿不到」这种状态 —— 也就是主人猜的
+    /// 「其实已经加载好了，就是不显示」。这种情况绝不能把 1.4 MB 又下一遍。
+    /// </summary>
+    public void ReloadTexture(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return;
+        lock (_texturesByUrl) _texturesByUrl.Remove(url);
+        _failedAt.TryRemove(url, out _);
+        Note($"重挂纹理（不重下文件）：{Short(url)}");
     }
 
     /// <summary>
@@ -197,26 +212,27 @@ public sealed class ThumbCache : IDisposable
                 string why = string.Empty;
                 var route = string.Empty;
 
-                // ① 直连（**单独超时**，不用 HttpClient 的 30 分钟）
+                // ① 直连（用**停滞检测**而不是总时长截断：实测一张整图要 9127 ms，
+                //    拿总时长去截会把本来会成功的下载掐掉）
                 try
                 {
-                    using var directCts = CancellationTokenSource.CreateLinkedTokenSource(jobCts.Token);
-                    directCts.CancelAfter(DirectAttemptMs);
+                    using var stallCts = CancellationTokenSource.CreateLinkedTokenSource(jobCts.Token);
+                    stallCts.CancelAfter(FetchLimits.ImageStallMs);
 
                     // ResponseHeadersRead + 手动读流：这样才能把**字节进度**报给界面。
-                    // 站点的整张预览图实测 1.5 MB，全程没有反馈的话用户只会看到「一直在转」。
+                    // 站点的整张预览图实测 1.43 MB，全程没有反馈的话用户只会看到「一直在转」。
                     // 另外带上站点头：实测同一张图「裸请求 15670 ms / 带头 7349 ms」。
                     using var req = new HttpRequestMessage(HttpMethod.Get, url);
                     req.Headers.TryAddWithoutValidation("User-Agent", XmaUrls.UserAgent);
                     req.Headers.TryAddWithoutValidation("Referer", XmaUrls.Root + "/");
                     req.Headers.TryAddWithoutValidation("Accept", "image/avif,image/webp,image/*,*/*;q=0.8");
 
-                    using var r = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, directCts.Token)
+                    using var r = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, stallCts.Token)
                                              .ConfigureAwait(false);
                     var media = r.Content.Headers.ContentType?.MediaType ?? string.Empty;
                     if (r.IsSuccessStatusCode && !media.StartsWith("text/", StringComparison.OrdinalIgnoreCase))
                     {
-                        bytes = await ReadWithProgressAsync(r, url, directCts.Token).ConfigureAwait(false);
+                        bytes = await ReadWithProgressAsync(r, url, stallCts, stallCts.Token).ConfigureAwait(false);
                         if (bytes is { Length: > 0 }) route = "直连";
                         else { bytes = null; why = "空响应"; }
                     }
@@ -229,7 +245,7 @@ public sealed class ThumbCache : IDisposable
                 }
                 catch (OperationCanceledException) when (!jobCts.IsCancellationRequested)
                 {
-                    why = $"直连 {DirectAttemptMs} ms 没响应（已放弃）";
+                    why = $"直连停滞 {FetchLimits.ImageStallMs} ms（没有任何新数据）";
                 }
                 catch (Exception e)
                 {
@@ -303,8 +319,14 @@ public sealed class ThumbCache : IDisposable
         });
     }
 
-    /// <summary>边读边报字节数（界面就能显示「0.6 / 1.5 MB」而不是干等）。</summary>
-    private async Task<byte[]?> ReadWithProgressAsync(HttpResponseMessage r, string url, CancellationToken ct)
+    /// <summary>
+    /// 边读边报字节数（界面就能显示「0.62 MB / 1.43 MB」而不是干等）。
+    ///
+    /// ⭐ 关键：这里是**停滞检测** —— 每读到数据就把 stall 计时重置。
+    /// 只要字节还在流就不打断（实测一张整图要 9 秒多，总时长截断会误杀）。
+    /// </summary>
+    private async Task<byte[]?> ReadWithProgressAsync(HttpResponseMessage r, string url,
+                                                      CancellationTokenSource stallCts, CancellationToken ct)
     {
         var total = r.Content.Headers.ContentLength ?? 0;
         _dlTotal[url] = total;
@@ -318,6 +340,7 @@ public sealed class ThumbCache : IDisposable
         {
             ms.Write(buf, 0, n);
             _dlGot[url] = ms.Length;
+            try { stallCts.CancelAfter(FetchLimits.ImageStallMs); } catch { /* 已取消/已释放就算了 */ }
         }
         if (ms.Length == 0) return null;
         Note($"直连下载完成 {ms.Length} 字节" + (total > 0 ? $"（站点声明 {total}）" : "（站点没给长度）"));

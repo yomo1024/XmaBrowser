@@ -64,6 +64,14 @@ public sealed class BrowserChannel : IDisposable
 
     public bool Enabled => _cfg.EnableBrowserChannel;
 
+    /// <summary>诊断出口（插件把它接到「关于」页日志与日志文件上）。目的是"卡在哪一段"能直接看到。</summary>
+    public Action<string>? Diag { get; set; }
+
+    private void Note(string msg)
+    {
+        try { Diag?.Invoke("[通道] " + msg); } catch { /* 忽略 */ }
+    }
+
     /// <summary>
     /// **预热**：提前把 headless 浏览器拉起来、连上 CDP，但**不访问站点**
     /// （打开 about:blank，不给站点多打一个请求）。
@@ -478,9 +486,29 @@ public sealed class BrowserChannel : IDisposable
     {
         if (_disposed) return null;
 
-        await _opLock.WaitAsync(ct).ConfigureAwait(false);
+        // ⭐ 等锁必须**有上限**：锁是串行的，如果前面一个操作卡住了，
+        // 后面所有请求就会无限排队 —— 用户看到的就是"点进去一直不动"。
+        var acquired = false;
+        var lockSw = System.Diagnostics.Stopwatch.StartNew();
+        using var lockCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        lockCts.CancelAfter(FetchLimits.OpLockWaitMs);
         try
         {
+            try
+            {
+                await _opLock.WaitAsync(lockCts.Token).ConfigureAwait(false);
+                acquired = true;
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                _lastError = $"通道忙：等操作锁超过 {FetchLimits.OpLockWaitMs} ms（有一个更早的通道操作卡住了）";
+                _log.Warn("浏览器通道 " + _lastError);
+                Note(_lastError);
+                return null;
+            }
+            lockSw.Stop();
+            if (lockSw.ElapsedMilliseconds > 1000) Note($"等通道锁 {lockSw.ElapsedMilliseconds} ms（被前面的操作占着）");
+
             // 空闲太久先把浏览器关掉：headless Chrome 常驻占上百 MB，闲着不划算。
             // 没有后台定时器，就在下一次要用通道时判断一次（简单、无额外线程）。
             var idleMinutes = _cfg.ChannelIdleMinutes;
@@ -516,7 +544,7 @@ public sealed class BrowserChannel : IDisposable
         }
         finally
         {
-            _opLock.Release();
+            if (acquired) _opLock.Release();
         }
     }
 
@@ -562,8 +590,8 @@ public sealed class BrowserChannel : IDisposable
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         await s.EnsureAdBlockingAsync(ct).ConfigureAwait(false);
-        await s.Cdp.SendAsync("Page.enable", null, ct).ConfigureAwait(false);
-        await s.Cdp.SendAsync("Page.navigate", new { url }, ct).ConfigureAwait(false);
+        await s.Cdp.SendAsync("Page.enable", null, ct, FetchLimits.PageEnableMs).ConfigureAwait(false);
+        await s.Cdp.SendAsync("Page.navigate", new { url }, ct, FetchLimits.PageNavigateMs).ConfigureAwait(false);
 
         // 等「够用」而不是「彻底加载完」：
         // 站点带广告脚本（s.nitropay 等），readyState 到 complete 常要拖好几秒；
@@ -585,7 +613,7 @@ public sealed class BrowserChannel : IDisposable
         {
             ct.ThrowIfCancellationRequested();
             var r = await s.Cdp.SendAsync("Runtime.evaluate",
-                new { expression = readyExpr, returnByValue = true }, ct, 15_000).ConfigureAwait(false);
+                new { expression = readyExpr, returnByValue = true }, ct, FetchLimits.EvalProbeMs).ConfigureAwait(false);
             var v = CdpClient.Value(r) ?? string.Empty;
             var parts = v.Split('|');
             var urlMatched = parts.Length >= 3 && parts[0].StartsWith(key, StringComparison.OrdinalIgnoreCase);
@@ -609,12 +637,13 @@ public sealed class BrowserChannel : IDisposable
         }
 
         var html = await s.Cdp.SendAsync("Runtime.evaluate",
-            new { expression = "document.documentElement.outerHTML", returnByValue = true }, ct, 60_000)
+            new { expression = "document.documentElement.outerHTML", returnByValue = true }, ct, FetchLimits.GrabHtmlMs)
             .ConfigureAwait(false);
         var outer = CdpClient.Value(html);
         // 之前这里用 "hardDeadline.AddSeconds(-5)" 反推耗时 —— 硬上限改过就失准，纯属瞎算。
         // 现在老老实实拿秒表量（从这个方法进门算起）。
         _log.Info($"浏览器通道取页面 {url[..Math.Min(60, url.Length)]}… → {outer?.Length ?? 0} 字节（{sw.ElapsedMilliseconds} ms）");
+        Note($"取页面 {sw.ElapsedMilliseconds} ms → {outer?.Length ?? 0} 字节 ← {url[..Math.Min(70, url.Length)]}");
         return outer;
     }
 
@@ -791,27 +820,37 @@ public sealed class BrowserChannel : IDisposable
             return null;
         }
 
-        // 整体超时：不让任何一步把调用方永久挂住（进程起不来 / 调试端口没开 / CDP 拒连…）
+        // 整体超时：不让任何一步把调用方永久挂住。
+        // ⭐ 而且**要封顶**：原来直接用 BrowserTimeoutSec（默认 180 秒），
+        // 起不来的话用户就得干等三分钟 —— 这是"卡一分钟"的主要来源之一。
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(_cfg.BrowserTimeoutSec, 30, 900)));
+        var budgetMs = Math.Min(Math.Clamp(_cfg.BrowserTimeoutSec, 30, 900) * 1000, FetchLimits.SessionStartBudgetMs);
+        timeout.CancelAfter(budgetMs);
 
+        var startSw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             _session = await Session.StartAsync(candidate, _cfg, _log, timeout.Token).ConfigureAwait(false);
             LastUsedBrowser = candidate;
             _lastError = string.Empty;
+            startSw.Stop();
+            Note($"起会话 {startSw.ElapsedMilliseconds} ms（{candidate.Label}）");
             return _session;
         }
         catch (OperationCanceledException)
         {
-            _lastError = $"启动浏览器通道超时（{_cfg.BrowserTimeoutSec} 秒）";
+            startSw.Stop();
+            _lastError = $"启动浏览器通道超时（{budgetMs} ms 预算用尽）";
             _log.Warn(_lastError);
+            Note(_lastError);
             return null;
         }
         catch (Exception e)
         {
-            _lastError = $"启动浏览器通道失败：{e.GetType().Name} {e.Message}";
+            startSw.Stop();
+            _lastError = $"启动浏览器通道失败（{startSw.ElapsedMilliseconds} ms）：{e.GetType().Name} {e.Message}";
             _log.Warn(_lastError);
+            Note(_lastError);
             return null;
         }
     }
@@ -1043,8 +1082,10 @@ public sealed class BrowserChannel : IDisposable
 
         private static async Task<string?> WaitForCdpAsync(int port, CancellationToken ct)
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
-            for (var i = 0; i < 80; i++)
+            // 单次探测 1 秒（原来 3 秒）+ 总时长封顶（原来 80×3s 可以拖到几分钟）
+            using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(FetchLimits.WaitForCdpProbeMs) };
+            var deadline = DateTime.UtcNow.AddMilliseconds(FetchLimits.WaitForCdpTotalMs);
+            while (DateTime.UtcNow < deadline)
             {
                 ct.ThrowIfCancellationRequested();
                 try
@@ -1057,7 +1098,7 @@ public sealed class BrowserChannel : IDisposable
                             return u.GetString();
                 }
                 catch { /* 还没起来 */ }
-                await Task.Delay(250, ct).ConfigureAwait(false);
+                await Task.Delay(200, ct).ConfigureAwait(false);
             }
             return null;
         }

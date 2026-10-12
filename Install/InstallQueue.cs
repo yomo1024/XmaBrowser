@@ -105,12 +105,36 @@ public sealed class InstallQueue : IDisposable
     /// <summary>给别的模块写诊断日志用（如浏览/详情耗时）。</summary>
     public void Note(string line) => LogDiag(line);
 
+    /// <summary>
+    /// 诊断日志同时落盘（主人找不到 dalamud.log，而远程排查必须有真实过程可看）。
+    /// 路径由插件传入；写失败一律忽略，绝不能因为日志把主流程搞挂。
+    /// </summary>
+    public string DiagFile { get; set; } = string.Empty;
+
+    public string DiagDirectory => DiagFile.Length > 0 ? Path.GetDirectoryName(DiagFile) ?? string.Empty : string.Empty;
+
+    private long _diagFileErrors;
+
     private void LogDiag(string line)
     {
+        var stamped = $"{DateTime.Now:HH:mm:ss}  {line}";
         lock (_diagLog)
         {
-            _diagLog.Add($"{DateTime.Now:HH:mm:ss}  {line}");
+            _diagLog.Add(stamped);
             if (_diagLog.Count > MaxDiagLog) _diagLog.RemoveAt(0);
+        }
+
+        if (DiagFile.Length == 0) return;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(DiagFile)!);
+            File.AppendAllText(DiagFile, stamped + Environment.NewLine, System.Text.Encoding.UTF8);
+        }
+        catch
+        {
+            // 日志写不了就算了，但记一次，免得完全无声
+            if (Interlocked.Increment(ref _diagFileErrors) == 1)
+                _log.Warn("诊断日志写不进文件：" + DiagFile);
         }
     }
 

@@ -21,6 +21,7 @@
          同一份代码既跑离线断言（不用网），也能加 live 参数跑联网实测。 -->
     <Compile Include="..\..\Site\IXmaLog.cs" />
     <Compile Include="..\..\Site\IXmaSettings.cs" />
+    <Compile Include="..\..\Site\FetchLimits.cs" />
     <Compile Include="..\..\Site\XmaModels.cs" />
     <Compile Include="..\..\Site\XmaBlock.cs" />
     <Compile Include="..\..\Site\SearchRouting.cs" />

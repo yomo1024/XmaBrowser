@@ -25,6 +25,7 @@ var detailProbe = args.Contains("detailtime");
 var loginProbe = args.Contains("login");
 var perfProbe = args.Contains("perf");
 var imgProbe = args.Contains("imgprobe");
+var adPerfProbe = args.Contains("adperf");
 var oneCheck = args.Contains("one");
 var authorProbe = args.Contains("author");
 var pass = 0;
@@ -810,13 +811,59 @@ Console.WriteLine("=== 13l. 同一张图被列表/详情先后请求（用户实
     // 超时常量必须是有界的（无限等 = 进度条一直转）。
     // 注意用数组接一下：这些是 const，直接比较的话编译器会把断言整个优化掉（CS8793），
     // 那种「通过」是假的。
-    int[] limits = [ImageFetchLimits.DirectAttemptMs, ImageFetchLimits.JobTimeoutMs,
+    int[] limits = [ImageFetchLimits.StallMs, ImageFetchLimits.JobTimeoutMs,
                     ImageFetchLimits.FailureCooldownSeconds];
-    Check("直连有独立超时且不长（原来继承 HttpClient 的 30 分钟 = 等于没有上限）",
+    Check("直连有停滞上限且不长（原来继承 HttpClient 的 30 分钟 = 等于没有上限）",
           limits[0] > 0 && limits[0] <= 15000, limits[0].ToString());
-    Check("整条任务有硬上限（绝不无限等）", limits[1] > 0 && limits[1] <= 60000, limits[1].ToString());
+    Check("整条任务有硬上限（绝不无限等）", limits[1] > 0 && limits[1] <= 120000, limits[1].ToString());
     Check("整条任务上限 > 直连上限（要留出回退通道的时间）", limits[1] > limits[0]);
     Check("失败冷却有上限（到期会重新尝试）", limits[2] > 0 && limits[2] <= 3600, limits[2].ToString());
+}
+
+Console.WriteLine();
+Console.WriteLine("=== 13m. 超时必须有界（「卡一分钟」的根源就是这里没上限）===");
+{
+    // 用数组接一下，免得 const 比较被编译器优化成恒真（那种"通过"是假的）
+    (string Name, int Value, int Max)[] caps =
+    [
+        ("CDP 单次调用上限", FetchLimits.CdpCallMs, 30000),
+        ("Page.enable", FetchLimits.PageEnableMs, 10000),
+        ("Page.navigate", FetchLimits.PageNavigateMs, 20000),
+        ("轮询求值", FetchLimits.EvalProbeMs, 10000),
+        ("取 HTML", FetchLimits.GrabHtmlMs, 30000),
+        ("会话启动总预算", FetchLimits.SessionStartBudgetMs, 30000),
+        ("等 CDP 端点总时长", FetchLimits.WaitForCdpTotalMs, 30000),
+        ("等 CDP 端点单次探测", FetchLimits.WaitForCdpProbeMs, 3000),
+        ("等通道锁", FetchLimits.OpLockWaitMs, 60000),
+        ("详情总看门狗(秒)", FetchLimits.DetailTimeoutSeconds, 40),
+        ("搜索总看门狗(秒)", FetchLimits.SearchTimeoutSeconds, 60),
+        ("取图整条上限(毫秒)", FetchLimits.ImageJobMs, 120000),
+        ("取图停滞上限(毫秒)", FetchLimits.ImageStallMs, 15000),
+    ];
+    var unbounded = new List<string>();
+    foreach (var (name, value, max) in caps)
+        if (value <= 0 || value > max) unbounded.Add($"{name}={value}");
+    Check("每一层超时都有界且不超过合理上限（一个都不能缺）", unbounded.Count == 0,
+          string.Join(", ", unbounded));
+
+    // 真正的不变量是「单次尝试」不会拖成一分钟（总看门狗再兜一层底）
+    var oneAttempt = FetchLimits.SessionStartBudgetMs + FetchLimits.PageEnableMs +
+                     FetchLimits.PageNavigateMs + 6000;
+    Check("单次尝试各步之和不会拖成一分钟", oneAttempt <= 60000, oneAttempt.ToString());
+    Check("总看门狗必须比单次尝试更早生效（用户看到的上限是它，不是各步之和）",
+          FetchLimits.DetailTimeoutSeconds * 1000 < oneAttempt,
+          $"{FetchLimits.DetailTimeoutSeconds * 1000} vs {oneAttempt}");
+    Check("详情总看门狗对用户是能忍的量级（<=30 秒）", FetchLimits.DetailTimeoutSeconds <= 30,
+          FetchLimits.DetailTimeoutSeconds.ToString());
+    Check("详情总看门狗比搜索紧（详情是用户盯着看的）",
+          FetchLimits.DetailTimeoutSeconds < FetchLimits.SearchTimeoutSeconds);
+    Check("详情看门狗不小于会话预算（别正常启动就被误杀）",
+          FetchLimits.DetailTimeoutSeconds * 1000 >= FetchLimits.SessionStartBudgetMs,
+          $"{FetchLimits.DetailTimeoutSeconds * 1000} vs {FetchLimits.SessionStartBudgetMs}");
+    Check("取图整条上限 > 停滞上限（慢可以，卡不行）",
+          FetchLimits.ImageJobMs > FetchLimits.ImageStallMs);
+    Check("停滞上限足够短（用户等不到「没反应」超过 10 秒）", FetchLimits.ImageStallMs <= 10000,
+          FetchLimits.ImageStallMs.ToString());
 }
 
 Console.WriteLine();
@@ -1538,10 +1585,11 @@ if (imgProbe)
         h.DefaultRequestHeaders.TryAddWithoutValidation("Referer", XmaUrls.Root + "/");
         h.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "image/*,*/*");
     }, 60_000);
-    await ProbeAsync("6 秒上限（v0.8.1 的新行为）", null, ImageFetchLimits.DirectAttemptMs);
+    await ProbeAsync("停滞上限（现在的行为：卡住才放弃）", null, ImageFetchLimits.StallMs);
 
-    Console.WriteLine($"  说明：v0.8.1 起直连单独 {ImageFetchLimits.DirectAttemptMs} ms 超时，" +
-                      $"整条任务 {ImageFetchLimits.JobTimeoutMs} ms 硬上限。");
+    Console.WriteLine($"  说明：直连现在是「**停滞** {ImageFetchLimits.StallMs} ms（没有新数据）就放弃」，" +
+                      $"整条任务 {ImageFetchLimits.JobTimeoutMs} ms 硬上限。" +
+                      "慢可以，卡不行 —— 实测一张整图要 9 秒多，总时长截断会误杀。");
 
     // ② 流式读 + 报字节：这就是界面现在会显示的东西（原来只有一句「下载中…」）
     Console.WriteLine("  --- 流式读取（界面进度条的数据来源）---");
@@ -1576,7 +1624,7 @@ if (imgProbe)
     using (var hhttp = new HttpClient { Timeout = TimeSpan.FromSeconds(30) })   // 故意给足 30 秒
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
-        linked.CancelAfter(ImageFetchLimits.DirectAttemptMs);
+        linked.CancelAfter(ImageFetchLimits.StallMs);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var aborted = false;
         try
@@ -1595,8 +1643,53 @@ if (imgProbe)
         sw.Stop();
         Console.WriteLine($"  黑洞地址：{sw.ElapsedMilliseconds} ms → {(aborted ? "已放弃（符合预期）" : "居然返回了？")}");
         Check("直连卡死时会在上限内自己放弃（绝不无限等）",
-              aborted && sw.ElapsedMilliseconds <= ImageFetchLimits.DirectAttemptMs + 3000,
+              aborted && sw.ElapsedMilliseconds <= ImageFetchLimits.StallMs + 3000,
               $"{sw.ElapsedMilliseconds} ms");
+    }
+}
+
+if (adPerfProbe)
+{
+    // 站点正常配合时才能真正量出「屏蔽广告」值多少 —— 挑战页时两者都是快速失败，量不出差别。
+    // 每次都用**全新的通道**（新 Chrome、冷缓存），保证两边条件一样。
+    Console.WriteLine();
+    Console.WriteLine("=== 22. 广告屏蔽到底省多少（站点正常时，A/B 各起一个新浏览器）===");
+    const string detailUrl = "https://www.xivmodarchive.com/modid/141115";
+
+    async Task<(long Ms, int Bytes, string Note)> NavAsync(bool blockAds, string label)
+    {
+        var st = new TestSettings { BlockAds = blockAds };
+        using var ch = new BrowserChannel(st, new NullLog());
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var html = await ch.GetHtmlAsync(detailUrl, CancellationToken.None);
+        sw.Stop();
+        var note = html is null ? "失败：" + ch.LastError : $"{html.Length} 字节";
+        Console.WriteLine($"  屏蔽【{(blockAds ? "开" : "关")}】{label}：{sw.ElapsedMilliseconds} ms → {note}");
+        return (sw.ElapsedMilliseconds, html?.Length ?? 0, note);
+    }
+
+    var offNav = await NavAsync(false, "（新浏览器，冷缓存）");
+    var onNav = await NavAsync(true, "（新浏览器，冷缓存）");
+
+    Check("两边都真的拿到了详情页（否则这组对比没意义）", offNav.Bytes > 10000 && onNav.Bytes > 10000,
+          $"{offNav.Bytes} / {onNav.Bytes}");
+    Console.WriteLine($"  结论：屏蔽前后 {offNav.Ms} ms → {onNav.Ms} ms" +
+                      $"（差 {(offNav.Ms - onNav.Ms)} ms，页面字节基本一致说明内容没被误伤）");
+
+    // 预览图：真实大小与耗时（站点配合时）
+    Console.WriteLine("  --- 预览图 ---");
+    using (var ihttp = new HttpClient { Timeout = TimeSpan.FromMinutes(2) })
+    {
+        ihttp.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", XmaUrls.UserAgent);
+        ihttp.DefaultRequestHeaders.TryAddWithoutValidation("Referer", XmaUrls.Root + "/");
+        const string img = "https://static.xivmodarchive.com/mod-images/7a4c13b5-b5ac-45dd-b034-df43c7132387.jpg";
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var bytes = await ihttp.GetByteArrayAsync(img);
+        sw.Stop();
+        Console.WriteLine($"  直连取预览图：{sw.ElapsedMilliseconds} ms → {bytes.Length} 字节" +
+                          $"（{bytes.Length / 1048576.0:0.00} MB）");
+        Check("预览图直连能拿到（停滞检测不会误杀慢下载）", bytes.Length > 1000,
+              $"{sw.ElapsedMilliseconds} ms / {bytes.Length} 字节");
     }
 }
 

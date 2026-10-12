@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using XmaBrowser.Site;
 
 namespace XmaBrowser.Ui;
 
@@ -8,17 +9,19 @@ namespace XmaBrowser.Ui;
 ///
 /// 为什么值得单独拿出来：这三个数直接决定用户会不会看到「进度条一直转」——
 /// 只要有一条路没有上限，界面就只能永远等下去。
+/// 具体数值统一由 <see cref="FetchLimits"/> 给出（一处定义，免得两套数字走偏）。
 /// </summary>
 public static class ImageFetchLimits
 {
     /// <summary>失败后多久才允许自动重试同一个 URL（原来是永久记住，NSFW 的图一次 403 就永远取不到）。</summary>
     public const int FailureCooldownSeconds = 600;
 
-    /// <summary>直连尝试的单独超时（毫秒）。**绝不能**直接继承 HttpClient 的 30 分钟 —— 那等于没有上限。</summary>
-    public const int DirectAttemptMs = 6000;
+    /// <summary>**停滞**上限（毫秒）：多久没有新字节就判定卡住（不是"总时长"）。
+    /// 每读到数据就重置 —— 见 FetchLimits.ImageStallMs 里的踩坑记录。</summary>
+    public const int StallMs = FetchLimits.ImageStallMs;
 
     /// <summary>一张图的整条任务上限（毫秒）：直连 + 通道加起来超过它就必须给出失败原因，绝不无限等。</summary>
-    public const int JobTimeoutMs = 25000;
+    public const int JobTimeoutMs = FetchLimits.ImageJobMs;
 }
 
 /// <summary>
