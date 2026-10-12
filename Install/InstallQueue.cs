@@ -249,9 +249,42 @@ public sealed class InstallQueue : IDisposable
             }
             finally
             {
+                // ⚠ 原来这里只刷新界面 —— 于是**失败/取消**的任务，下载的包和解压目录就一直躺在磁盘上。
+                // 成功路径自己会删，所以这里重复删一次是无害的。
+                CleanupJobFiles(next);
                 Changed?.Invoke();
             }
         }
+    }
+
+    /// <summary>
+    /// 把这条任务的临时文件清干净：**下载的包** + **解压目录**。
+    /// 成功路径自己会删；这个方法是给失败/取消用的（原来那种情况什么都不删）。
+    /// 重复调用无害。
+    /// </summary>
+    private void CleanupJobFiles(InstallJob job)
+    {
+        try
+        {
+            if (job.FileName.Length > 0)
+            {
+                // 注意：真正落盘的名字可能被补过 .pmp（见 ProcessAsync 里的 dest 拼装），两个都试
+                foreach (var name in new[] { job.FileName, job.FileName + ".pmp" })
+                {
+                    var f = Path.Combine(_workRoot, name);
+                    if (File.Exists(f)) File.Delete(f);
+                    if (File.Exists(f + ".part")) File.Delete(f + ".part");
+                }
+            }
+        }
+        catch { /* 忽略 */ }
+
+        try
+        {
+            var d = Path.Combine(_workRoot, "extract", job.Id);
+            if (Directory.Exists(d)) Directory.Delete(d, true);
+        }
+        catch { /* 忽略 */ }
     }
 
     private async Task ProcessAsync(InstallJob job, CancellationToken ct)

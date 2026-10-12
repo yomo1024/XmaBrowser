@@ -867,6 +867,77 @@ Console.WriteLine("=== 13m. 超时必须有界（「卡一分钟」的根源就�
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 13n. 缓存维护：按上限淘汰 / 清过期（用真实文件跑）===");
+{
+    var root = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "cachemaint-" + Guid.NewGuid().ToString("N")[..8]);
+    var thumbs = Path.Combine(root, "thumbs");
+    var covers = Path.Combine(root, "covers");
+    var temp = Path.Combine(root, "temp");
+    Directory.CreateDirectory(thumbs);
+    Directory.CreateDirectory(covers);
+    Directory.CreateDirectory(temp);
+
+    var now = DateTime.UtcNow;
+    // 三个文件：越旧越小/越大都行，关键是**写入时间**决定淘汰顺序
+    var mk = (string dir, string name, int size, int ageMinutes) =>
+    {
+        var p = Path.Combine(dir, name);
+        File.WriteAllBytes(p, new byte[size]);
+        File.SetLastWriteTimeUtc(p, now.AddMinutes(-ageMinutes));
+        return p;
+    };
+    var oldest = mk(thumbs, "old.img", 1000, 90);
+    var middle = mk(thumbs, "mid.img", 1000, 60);
+    var newest = mk(thumbs, "new.img", 1000, 30);
+
+    var (bytes, files) = CacheMaintenance.Measure(thumbs);
+    Check("量占用：字节数与文件数都对", bytes == 3000 && files == 3, $"{bytes} / {files}");
+
+    // 上限 2000 → 必须删掉最旧的 1 个
+    var deleted = CacheMaintenance.EvictToLimit(thumbs, 2000, out var left);
+    Check("超出上限时按「最久没写过」先删", deleted == 1 && left == 2000, $"删 {deleted}，剩 {left}");
+    Check("被删的确实是最旧那个", !File.Exists(oldest), "old.img 应该被删");
+    Check("较新的两个留着", File.Exists(middle) && File.Exists(newest));
+
+    // 上限 <= 0 = 不淘汰
+    var none = CacheMaintenance.EvictToLimit(thumbs, 0, out _);
+    Check("上限 <= 0 表示不淘汰", none == 0 && File.Exists(middle) && File.Exists(newest));
+
+    // 已经在上限内 → 不动
+    var again = CacheMaintenance.EvictToLimit(thumbs, 999999, out var same);
+    Check("没超上限就不动它", again == 0 && same == 2000, $"{again} / {same}");
+
+    // 清过期：temp 里放一个很旧的和一个新的
+    var staleFile = mk(temp, "残留包.pmp", 500, 60 * 30);          // 30 小时前
+    var freshFile = mk(temp, "刚下的.pmp", 500, 5);                 // 5 分钟前
+    var removed = CacheMaintenance.DeleteOlderThan(temp, TimeSpan.FromHours(24), now);
+    Check("清过期：只删超过 24 小时的", removed == 1 && !File.Exists(staleFile) && File.Exists(freshFile),
+          $"删了 {removed} 个");
+
+    // 空目录会被收掉（解压残留常见）
+    var empty = Path.Combine(covers, "extract7");
+    Directory.CreateDirectory(empty);
+    CacheMaintenance.EvictToLimit(covers, 1, out _);
+    Check("淘汰顺手收掉空目录", !Directory.Exists(empty));
+
+    // 整个 Maintain 跑一遍：三个目录 + 临时残留
+    var mStale = Path.Combine(covers, "很旧的封面.jpg");
+    File.WriteAllBytes(mStale, new byte[5000]);
+    File.SetLastWriteTimeUtc(mStale, now.AddHours(-100));
+    var mReport = CacheMaintenance.Maintain(
+        [("封面图", covers, 1000), ("预览图", thumbs, 999999)], temp, TimeSpan.FromHours(24), now);
+    Check("Maintain 报告里说明了动了什么", mReport.Contains("封面图"), mReport);
+
+    // 目录不存在 / 空路径都不能崩
+    var missing = Path.Combine(root, "not-exist");
+    var miss = CacheMaintenance.EvictToLimit(missing, 100, out var missLeft);
+    Check("目录不存在时不崩且返回 0", miss == 0 && missLeft == 0);
+    Check("Measure 对不存在的目录返回 0", CacheMaintenance.Measure(missing) == (0L, 0));
+
+    try { Directory.Delete(root, true); } catch { /* 忽略 */ }
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 13h. 挑战页/空页识别（浏览器通道取页面是否可用）===");
 {
     // 挑战页实测约 29KB —— 不能只按“小/空”判断，否则会把挑战页当成正常的“没有结果”。

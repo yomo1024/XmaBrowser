@@ -43,6 +43,13 @@ public sealed class Plugin : IDalamudPlugin
     public Translator Translator { get; }
     public HttpClient Http => _http;
 
+    // 各类缓存目录（缓存维护与设置页显示占用要用）
+    public string CacheDir { get; }
+    public string ThumbsDir { get; }
+    public string CoversDir { get; }
+    public string TempDir { get; }
+    public string TranslateDir { get; }
+
     public readonly WindowSystem WindowSystem = new("XmaBrowser");
     private readonly MainWindow _window;
     private readonly HttpClient _http;
@@ -58,6 +65,11 @@ public sealed class Plugin : IDalamudPlugin
             ? Path.Combine(PluginInterface.ConfigDirectory.FullName, "downloads")
             : Configuration.CacheDirectory;
         Directory.CreateDirectory(cacheDir);
+        CacheDir = cacheDir;
+        ThumbsDir = Path.Combine(cacheDir, "thumbs");
+        CoversDir = Path.Combine(cacheDir, "covers");
+        TempDir = Path.Combine(cacheDir, "temp");
+        TranslateDir = Path.Combine(PluginInterface.ConfigDirectory.FullName, "translate");
 
         Site = new XmaClient(_http, Configuration, cacheDir, new DalamudLogAdapter(Log));
 

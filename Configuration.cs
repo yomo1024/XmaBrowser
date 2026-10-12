@@ -54,6 +54,21 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
     /// <summary>缩略图磁盘缓存上限（MB），超出按最久未用淘汰。</summary>
     public int ThumbCacheMb { get; set; } = 256;
 
+    /// <summary>
+    /// 封面图缓存上限（MB）。原来**完全没有清理** —— 每装一个 Mod 存一张，只增不减。
+    /// 超过上限时按「最久没被写过」的先删（写入时间≈使用时间）。
+    /// </summary>
+    public int CoverCacheMb { get; set; } = 128;
+
+    /// <summary>翻译缓存上限（MB）。原来也**完全没有清理**。超过按最久未用淘汰。</summary>
+    public int TranslateCacheMb { get; set; } = 64;
+
+    /// <summary>
+    /// 临时目录（下载的安装包 + 解压目录）里，超过这么多小时的残留清掉（小时）。
+    /// 正常装完/失败都会立刻清理，这条是兜底 —— 比如插件崩在中间留下的。
+    /// </summary>
+    public int TempLeftoverHours { get; set; } = 24;
+
     /// <summary>浏览结果用宫格（卡片）展示；false = 列表。</summary>
     public bool GridView { get; set; }
 

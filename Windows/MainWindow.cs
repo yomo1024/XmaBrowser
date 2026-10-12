@@ -1897,19 +1897,133 @@ public class MainWindow : Window
         }
 
         ImGui.Spacing();
-        ImGui.TextColored(Blue, "缩略图缓存");
+        ImGui.TextColored(Blue, "缓存（占用与清理）");
         ImGui.Separator();
+
         var mb = cfg.ThumbCacheMb;
         ImGui.SetNextItemWidth(160);
-        if (ImGui.InputInt("磁盘上限（MB）", ref mb))
+        if (ImGui.InputInt("预览图上限（MB）", ref mb))
         {
             cfg.ThumbCacheMb = Math.Clamp(mb, 16, 4096);
             changed = true;
         }
 
+        ImGui.SameLine();
+        var coverMb = cfg.CoverCacheMb;
+        ImGui.SetNextItemWidth(160);
+        if (ImGui.InputInt("封面上限（MB）", ref coverMb))
+        {
+            cfg.CoverCacheMb = Math.Clamp(coverMb, 8, 2048);
+            changed = true;
+        }
+
+        ImGui.SameLine();
+        var trMb = cfg.TranslateCacheMb;
+        ImGui.SetNextItemWidth(160);
+        if (ImGui.InputInt("翻译上限（MB）", ref trMb))
+        {
+            cfg.TranslateCacheMb = Math.Clamp(trMb, 8, 2048);
+            changed = true;
+        }
+
+        var leftover = cfg.TempLeftoverHours;
+        ImGui.SetNextItemWidth(160);
+        if (ImGui.InputInt("临时残留保留（小时）", ref leftover))
+        {
+            cfg.TempLeftoverHours = Math.Clamp(leftover, 1, 720);
+            changed = true;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("下载的安装包与解压目录：正常装完或失败都会立刻删；\n" +
+                             "这条只兜底「插件崩在中间」这类残留。");
+
+        ImGui.Spacing();
+        if (ImGui.Button("立即清理缓存")) MaintainCaches(force: true);
+        ImGui.SameLine();
+        if (ImGui.Button("打开缓存文件夹")) OpenFolder(_plugin.CacheDir);
+        ImGui.SameLine();
+        ImGui.TextColored(Dim, "搜索完会顺手自动跑一次维护");
+
+        // 占用情况（每 3 秒重算一次，别每帧扫盘）
+        if ((DateTime.UtcNow - _cacheReportUtc).TotalSeconds > 3)
+        {
+            _cacheReportUtc = DateTime.UtcNow;
+            _cacheReport = BuildCacheReport();
+        }
+        if (_cacheReport.Length > 0)
+        {
+            ImGui.BeginChild("xma-cache-report", new Vector2(0, S(96f)), true);
+            ImGui.TextColored(Dim, _cacheReport);
+            ImGui.EndChild();
+        }
+
+        if (_cacheMessage.Length > 0)
+            ImGui.TextColored(Blue, _cacheMessage);
+
         ImGui.EndChild();
 
         if (changed) cfg.Save();
+    }
+
+    /// <summary>
+    /// 缓存维护：各目录按上限淘汰 + 清掉临时目录里的陈年残留。
+    /// 五分钟内重复调用会跳过（除非 force），因为要扫盘。
+    /// </summary>
+    private void MaintainCaches(bool force = false)
+    {
+        if (!force && (DateTime.UtcNow - _lastCacheMaintainUtc).TotalMinutes < 5) return;
+        _lastCacheMaintainUtc = DateTime.UtcNow;
+
+        var cfg = _plugin.Configuration;
+        string report;
+        try
+        {
+            report = CacheMaintenance.Maintain(
+            [
+                ("预览图", _plugin.ThumbsDir, Math.Max(16, cfg.ThumbCacheMb) * 1048576L),
+                ("封面图", _plugin.CoversDir, Math.Max(8, cfg.CoverCacheMb) * 1048576L),
+                ("翻译缓存", _plugin.TranslateDir, Math.Max(8, cfg.TranslateCacheMb) * 1048576L),
+            ],
+            _plugin.TempDir, TimeSpan.FromHours(Math.Max(1, cfg.TempLeftoverHours)), DateTime.UtcNow);
+        }
+        catch (Exception e)
+        {
+            report = $"维护出错：{e.GetType().Name}";
+        }
+
+        if (report != "缓存都在上限内，没动")
+        {
+            _plugin.Jobs.Note("缓存维护：" + report);
+            _cacheMessage = $"{DateTime.Now:HH:mm:ss} {report}";
+        }
+        else if (force)
+        {
+            _cacheMessage = $"{DateTime.Now:HH:mm:ss} 缓存都在上限内，没动";
+        }
+
+        _cacheReportUtc = DateTime.MinValue;   // 让占用显示马上刷新
+    }
+
+    /// <summary>各缓存目录的占用与上限（给设置页显示 —— 别让用户去猜占了多少）。</summary>
+    private string BuildCacheReport()
+    {
+        var cfg = _plugin.Configuration;
+        var rows = new List<CacheUsage>
+        {
+            MakeUsage("预览图  ", _plugin.ThumbsDir, Math.Max(16, cfg.ThumbCacheMb) * 1048576L),
+            MakeUsage("封面图  ", _plugin.CoversDir, Math.Max(8, cfg.CoverCacheMb) * 1048576L),
+            MakeUsage("翻译缓存", _plugin.TranslateDir, Math.Max(8, cfg.TranslateCacheMb) * 1048576L),
+            MakeUsage("临时目录", _plugin.TempDir, 0),
+        };
+        var total = rows.Sum(r => r.Bytes);
+        return string.Join("\n", rows.Select(r => "  " + r.Describe())) +
+               $"\n  合计：{CacheUsage.Mb(total)}　（缓存根目录：{_plugin.CacheDir}）";
+    }
+
+    private static CacheUsage MakeUsage(string name, string dir, long limitBytes)
+    {
+        var (bytes, files) = CacheMaintenance.Measure(dir);
+        return new CacheUsage(name, dir, bytes, files, limitBytes);
     }
 
     // ==================================================================== 关于
@@ -2249,7 +2363,8 @@ public class MainWindow : Window
 
         // 如果是「关注作者 → 看他作品」触发的，顺手算一下自上次以来的新品
         AfterSearchForFollowedAuthor();
-        _plugin.Thumbs.Trim();
+        // 顺手跑一次缓存维护（各目录按上限淘汰 + 清陈年临时残留），频次限制在 5 分钟一次
+        MaintainCaches();
     }
 
     private void StartSearch(int page)
@@ -2651,6 +2766,11 @@ public class MainWindow : Window
     // 「文件已在本地但纹理没就绪」的自动重挂（每个 mod 只一次）
     private int _previewTextureReloads;
     private DateTime _previewReadySince = DateTime.MinValue;
+    // 缓存维护：上次跑的时间 + 占用报告 + 结果提示
+    private DateTime _lastCacheMaintainUtc = DateTime.MinValue;
+    private DateTime _cacheReportUtc = DateTime.MinValue;
+    private string _cacheReport = string.Empty;
+    private string _cacheMessage = string.Empty;
 
     /// <summary>插件 profile 里有没有 XIVModArchive 登录态（结果缓存 2 秒，免得每帧都去扫 cookie 库）。</summary>
     private bool OwnedLoginCached()

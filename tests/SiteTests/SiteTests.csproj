@@ -49,6 +49,7 @@
     <Compile Include="..\..\Ui\UiScale.cs" />
     <Compile Include="..\..\Ui\LoadProgress.cs" />
     <Compile Include="..\..\Ui\ImageJobState.cs" />
+    <Compile Include="..\..\Ui\CacheMaintenance.cs" />
   </ItemGroup>
 
   <ItemGroup>
