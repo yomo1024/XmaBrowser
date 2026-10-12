@@ -65,7 +65,7 @@ public sealed class Plugin : IDalamudPlugin
         Penumbra = new PenumbraBridge(PluginInterface, Framework, Log);
         Channel = new BrowserChannel(Configuration, logAdapter);
         Thumbs = new ThumbCache(_http, TextureProvider, Log, Path.Combine(cacheDir, "thumbs"),
-                                Configuration.ThumbCacheMb);
+                                Configuration.ThumbCacheMb, Channel);
         Covers = new CoverFetcher(Site, Channel, logAdapter, Path.Combine(cacheDir, "covers"));
         Jobs = new InstallQueue(Site, Penumbra, Configuration, Channel, Covers, logAdapter,
                                 Path.Combine(cacheDir, "temp"),

@@ -21,6 +21,7 @@ var translateOnly = args.Contains("translate");
 var nsfwProbe = args.Contains("nsfw");
 var nsfwDiag = args.Contains("nsfwdiag");
 var timingProbe = args.Contains("timing");
+var detailProbe = args.Contains("detailtime");
 var oneCheck = args.Contains("one");
 var authorProbe = args.Contains("author");
 var pass = 0;
@@ -575,6 +576,68 @@ Console.WriteLine("=== 13g. 直连被人机校验后的冷却记忆 ===");
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 13i. 详情短期缓存 + 「需要登录态」记忆 ===");
+{
+    // —— 详情缓存：NSFW 详情要过浏览器通道（实测 2.8–3.6 秒），来回点不该每次重来
+    var dc = new DetailCache(ttlSeconds: 2, capacity: 3);
+    Check("详情缓存：空的时候查不到", !dc.TryGet("141115", out _));
+
+    dc.Put("141115", new ModDetail { ModId = "141115", Title = "Vanilla+ eyes" });
+    Check("详情缓存：放进去就能查到",
+          dc.TryGet("141115", out var d1) && d1.Title == "Vanilla+ eyes");
+    Check("详情缓存：不同 mod 不串", !dc.TryGet("95080", out _));
+    Check("详情缓存：键会去掉空白", DetailCache.KeyFor("  141115  ") == "141115");
+
+    dc.Remove("141115");
+    Check("详情缓存：Remove 之后失效", !dc.TryGet("141115", out _));
+
+    dc.Put("a", new ModDetail { Title = "a" });
+    dc.Put("b", new ModDetail { Title = "b" });
+    dc.Put("c", new ModDetail { Title = "c" });
+    dc.Put("d", new ModDetail { Title = "d" });
+    Check("详情缓存：超出容量会淘汰（不无限涨）", dc.Count <= 3, dc.Count.ToString());
+
+    var dcTiny = new DetailCache(ttlSeconds: 1, capacity: 4);
+    dcTiny.Put("x", new ModDetail { Title = "x" });
+    Check("详情缓存：TTL 内命中", dcTiny.TryGet("x", out _));
+    Thread.Sleep(1200);
+    Check("详情缓存：TTL 过期后失效", !dcTiny.TryGet("x", out _));
+
+    var dcOff = new DetailCache(ttlSeconds: 0, capacity: 4);
+    dcOff.Put("y", new ModDetail());
+    Check("详情缓存：TTL=0 = 关闭", !dcOff.TryGet("y", out _) && dcOff.Count == 0);
+    Check("详情缓存：空 modId 不缓存", !new DetailCache().TryGet("", out _));
+
+    // —— 需要登录态记忆：NSFW 详情直连必然 403（原因码是 NeedsLogin 而不是挑战），
+    //    那条冷却对它不生效，所以要单独按 modId 记住，免得每次白撞约 1 秒。
+    var nl = new NeedsLoginMemory(capacity: 3, ttlSeconds: 3600);
+    var n0 = new DateTime(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
+
+    Check("需要登录态：初始不认识这条 mod", !nl.Needs("103953", n0));
+    nl.Mark("103953", n0);
+    Check("需要登录态：标记后就认得", nl.Needs("103953", n0.AddMinutes(30)));
+    Check("需要登录态：别的 mod 不受影响", !nl.Needs("141115", n0));
+
+    var nlTtl = new NeedsLoginMemory(capacity: 10, ttlSeconds: 60);
+    nlTtl.Mark("1", n0);
+    Check("需要登录态：TTL 内有效", nlTtl.Needs("1", n0.AddSeconds(59)));
+    Check("需要登录态：TTL 过后失效（登录态可能变了）", !nlTtl.Needs("1", n0.AddSeconds(61)));
+
+    var nlCap = new NeedsLoginMemory(capacity: 2, ttlSeconds: 3600);
+    nlCap.Mark("old", n0);
+    nlCap.Mark("mid", n0.AddMinutes(1));
+    nlCap.Mark("new", n0.AddMinutes(2));
+    Check("需要登录态：超容量丢最久没用的", nlCap.Count <= 2 && !nlCap.Needs("old", n0.AddMinutes(3)),
+          nlCap.Count.ToString());
+    Check("需要登录态：最近的还在", nlCap.Needs("new", n0.AddMinutes(3)));
+
+    nlCap.Mark("", n0);
+    Check("需要登录态：空 modId 安全", !nlCap.Needs("", n0));
+    nlCap.Clear();
+    Check("需要登录态：Clear 之后清空", nlCap.Count == 0 && !nlCap.Needs("new", n0));
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 13h. 挑战页/空页识别（浏览器通道取页面是否可用）===");
 {
     // 挑战页实测约 29KB —— 不能只按“小/空”判断，否则会把挑战页当成正常的“没有结果”。
@@ -1007,6 +1070,127 @@ if (oneCheck)
     }
 }
 
+if (detailProbe)
+{
+    // NSFW 详情耗时拆解：一条 NSFW mod 走完整链路，逐段计时。
+    // 目的：确认「慢」到底在 直连白撞 / 通道冷启动 / 通道导航 / 预览图 哪一段。
+    Console.WriteLine();
+    Console.WriteLine("=== 17. NSFW 详情耗时拆解 ===");
+    var dSettings = new TestSettings();
+    var dCache = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "detail");
+    Directory.CreateDirectory(dCache);
+    using var dHttp = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+    dHttp.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36");
+    dHttp.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://www.xivmodarchive.com/");
+    using var dClient = new XmaClient(dHttp, dSettings, dCache, new NullLog());
+    using var dChannel = new BrowserChannel(dSettings, new TimeLog());
+
+    string modId = string.Empty, thumb = string.Empty, title = string.Empty;
+    var dSw = System.Diagnostics.Stopwatch.StartNew();
+
+    // 站点如果正在挑战本机 IP，NSFW 搜索拿不到样本 → 允许命令行直接给一个 modid
+    var explicitMod = args.FirstOrDefault(a => a.Length >= 4 && a.All(char.IsDigit)) ?? string.Empty;
+    const string sampleImg = "https://static.xivmodarchive.com/mod-images/7a4c13b5-b5ac-45dd-b034-df43c7132387.jpg";
+    var skippedSearch = args.Contains("skipsearch");
+
+    // ① 拿一条真 NSFW 的 mod（通道搜索 nsfw=true —— 这一趟也顺带量了「冷启动」）
+    var nsfwUrl = XmaUrls.Search(new SearchQuery { Page = 1, NsfwMode = 2 });
+    if (skippedSearch)
+    {
+        Console.WriteLine("   ① 跳过搜索（命令行指定了 modid / skipsearch）");
+    }
+    else
+    {
+        var nsfwHtml = await dChannel.GetHtmlAsync(nsfwUrl, CancellationToken.None);
+        dSw.Stop();
+        Console.WriteLine($"   ① 通道搜「只看 NSFW」（含冷启动）：{dSw.ElapsedMilliseconds} ms" +
+                          (nsfwHtml is null ? $" → 失败：{dChannel.LastError}" : $" → {nsfwHtml.Length} 字节"));
+        if (nsfwHtml is not null)
+        {
+            var hits = XmaParser.ParseSearch(nsfwHtml, 1, nsfwUrl).Hits;
+            if (hits.Count > 0) { modId = hits[0].ModId; title = hits[0].Title; thumb = hits[0].ThumbUrl; }
+            Console.WriteLine($"      取到 {hits.Count} 条，拿第一条当样本：{modId}「{title}」");
+        }
+    }
+
+    if (modId.Length == 0 && explicitMod.Length > 0)
+    {
+        modId = explicitMod;
+        Console.WriteLine($"   ① 退回命令行指定的 modid：{modId}");
+    }
+
+    if (modId.Length > 0)
+    {
+        var pageUrl = XmaUrls.ModPage(modId);
+        ModDetail? parsed = null;
+
+        // ② 直连详情（NSFW 应该必然失败 —— 这段就是纯浪费的时间）
+        dSw.Restart();
+        try
+        {
+            parsed = await dClient.DetailAsync(modId, CancellationToken.None);
+            dSw.Stop();
+            Console.WriteLine($"   ② 直连详情：{dSw.ElapsedMilliseconds} ms → 成功「{parsed.Title}」" +
+                              $"（下载链 {(parsed.DownloadHref.Length > 0 ? "有" : "无")}）");
+        }
+        catch (Exception e)
+        {
+            dSw.Stop();
+            var m = e.Message;
+            Console.WriteLine($"   ② 直连详情：{dSw.ElapsedMilliseconds} ms → 失败：{m[..Math.Min(70, m.Length)]}");
+        }
+
+        // ③ 通道详情（此时会话已热）
+        dSw.Restart();
+        var html = await dChannel.GetHtmlAsync(pageUrl, CancellationToken.None);
+        dSw.Stop();
+        if (html is null)
+        {
+            Console.WriteLine($"   ③ 通道详情（热）：{dSw.ElapsedMilliseconds} ms → 失败：{dChannel.LastError}");
+        }
+        else
+        {
+            parsed = XmaParser.ParseDetail(html, modId, pageUrl);
+            Console.WriteLine($"   ③ 通道详情（热）：{dSw.ElapsedMilliseconds} ms → {html.Length} 字节，" +
+                              $"「{parsed.Title}」预览图 {parsed.Images.Count} 张，下载链 {(parsed.DownloadHref.Length > 0 ? "有" : "无")}");
+        }
+
+        // ④ 通道详情再来一次（验证「同一个 mod 再看一次」是不是还要付全价）
+        dSw.Restart();
+        var html2 = await dChannel.GetHtmlAsync(pageUrl, CancellationToken.None);
+        dSw.Stop();
+        Console.WriteLine($"   ④ 通道详情（热·第二次）：{dSw.ElapsedMilliseconds} ms → {html2?.Length ?? 0} 字节");
+
+        // ⑤ 预览图：直连能不能取？（决定详情面板的图要不要走通道）
+        var img = parsed?.Images.Count > 0 ? parsed.Images[0] : (thumb.Length > 0 ? thumb : sampleImg);
+        if (img.Length > 0)
+        {
+            dSw.Restart();
+            try
+            {
+                using var ir = await dHttp.GetAsync(img, CancellationToken.None);
+                var bytes = await ir.Content.ReadAsByteArrayAsync(CancellationToken.None);
+                dSw.Stop();
+                Console.WriteLine($"   ⑤ 直连取预览图：{dSw.ElapsedMilliseconds} ms → HTTP {(int)ir.StatusCode}" +
+                                  $"（{bytes.Length} 字节，{ir.Content.Headers.ContentType?.MediaType}）");
+            }
+            catch (Exception e)
+            {
+                dSw.Stop();
+                Console.WriteLine($"   ⑤ 直连取预览图：{dSw.ElapsedMilliseconds} ms → 异常 {e.GetType().Name}");
+            }
+
+            // ⑥ 同一个图走通道要多久（这就是「详情面板图片走通道」的代价）
+            dSw.Restart();
+            var imgBytes = await dChannel.GetImageBytesAsync(img, CancellationToken.None);
+            dSw.Stop();
+            Console.WriteLine($"   ⑥ 通道取预览图：{dSw.ElapsedMilliseconds} ms → {(imgBytes?.Length ?? 0)} 字节" +
+                              (imgBytes is null ? $"（失败：{dChannel.LastError}）" : ""));
+        }
+    }
+}
+
 Console.WriteLine();
 Console.WriteLine($"==== 结果：通过 {pass}，失败 {fail} ====");
 return fail == 0 ? 0 : 1;
@@ -1028,6 +1212,15 @@ internal sealed class TestTranslateSettings : ITranslateSettings
     public string TranslateApiKey => string.Empty;
     public string TranslateModel => "deepseek-chat";
     public string TranslateProxy => string.Empty;
+}
+
+internal sealed class TimeLog : IXmaLog
+{
+    private readonly System.Diagnostics.Stopwatch _sw = System.Diagnostics.Stopwatch.StartNew();
+    public void Info(string message) => Console.WriteLine($"        · [{_sw.ElapsedMilliseconds,6} ms] {message}");
+    public void Warn(string message) => Console.WriteLine($"        · [{_sw.ElapsedMilliseconds,6} ms] ⚠ {message}");
+    public void Debug(string message) { }
+    public void Error(string message) => Console.WriteLine($"        · [{_sw.ElapsedMilliseconds,6} ms] ✖ {message}");
 }
 
 internal sealed class TestSettings : IXmaSettings, IBrowserSettings

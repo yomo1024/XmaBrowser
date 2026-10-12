@@ -1028,9 +1028,17 @@ public class MainWindow : Window
         {
             var idx = ((_previewIndex % d.Images.Count) + d.Images.Count) % d.Images.Count;
             var w = ImGui.GetContentRegionAvail().X;
-            var wrap = _plugin.Thumbs.Get(d.Images[idx])?.GetWrapOrDefault();
+            // 预览图：NSFW 的图直连会被 403 —— 允许它回退到浏览器通道。
+            // 只对「用户正在看的这一张」开放通道（列表里 15 张缩略图不能一起涌进通道）。
+            var previewUrl = d.Images[idx];
+            var wrap = _plugin.Thumbs.Get(previewUrl, allowChannel: true)?.GetWrapOrDefault();
             if (wrap is not null) ImGui.Image(wrap.Handle, Fit(wrap.Size, w, 230f));
-            else ImGui.Dummy(new Vector2(w, 30));
+            else
+            {
+                ImGui.Dummy(new Vector2(w, 30));
+                var st = _plugin.Thumbs.Status(previewUrl);
+                if (st.Length > 0) ImGui.TextColored(Dim, "预览图：" + st);
+            }
 
             if (d.Images.Count > 1)
             {
@@ -2084,6 +2092,19 @@ public class MainWindow : Window
         var modId = hit.ModId;
         var pageUrl = XmaUrls.ModPage(modId);
 
+        // 详情短期缓存：同一条 mod 在几分钟内再看就直接用。
+        // 为什么需要：NSFW 详情只能走通道（实测 2.8–3.6 秒，还要跟别人的通道操作排队），
+        // 而看 Mod 的习惯就是「点进去 → 回列表 → 再点回来」，每次都重来就特别慢。
+        if (_detailCache.TryGet(modId, out var cachedDetail))
+        {
+            _detail = cachedDetail;
+            _detailViaChannel = false;
+            _detailChannelReason = "短缓存";
+            _detailBusy = false;
+            _plugin.Jobs.Note($"详情命中短缓存：{cachedDetail.Title}");
+            return;
+        }
+
         Task.Run(async () =>
         {
             // 详情：**先直连**（快，通常 1 秒内），只有直连拿不到「下载直链」时才回退浏览器通道。
@@ -2091,7 +2112,13 @@ public class MainWindow : Window
             // 站点只在登录态下才给 NSFW 的下载直链，所以判据是「解析出来的 DownloadHref 是否为空」。
             var canFallBack = channel.Enabled && cfg.AutoFallbackToBrowser;
             // 直连刚被人机校验拦过 → 详情也别先撞一次（实测白等约 1 秒）
-            var skipDirect = canFallBack && _directBlocked.IsBlocked(DateTime.UtcNow);
+            var directBlocked = canFallBack && _directBlocked.IsBlocked(DateTime.UtcNow);
+            // 「只看 NSFW」模式下**每条结果都是 NSFW**。而 NSFW 的详情只有带登录态（浏览器通道）
+            // 才看得见 —— 直连必然被拒。所以这种模式下别再白撞直连（实测每次白等 936 ms）。
+            var nsfwOnly = _form.NsfwMode == 2;
+            // 混合模式下：这条 mod 之前已经被证实「需要登录态」→ 也别再撞
+            var knownNeedsLogin = canFallBack && _needsLogin.Needs(modId, DateTime.UtcNow);
+            var skipDirect = directBlocked || nsfwOnly || knownNeedsLogin;
             if (!skipDirect)
             {
                 var dSw = System.Diagnostics.Stopwatch.StartNew();
@@ -2104,6 +2131,7 @@ public class MainWindow : Window
                     {
                         _detail = parsed;
                         _directBlocked.MarkHealthy();
+                        _detailCache.Put(modId, parsed);
                         _plugin.Jobs.Note($"详情（直连）{dSw.ElapsedMilliseconds} ms：{parsed.Title}");
                         return;
                     }
@@ -2116,12 +2144,18 @@ public class MainWindow : Window
                     dSw.Stop();
                     if (denied.Reason == XmaBlockReason.CloudflareChallenge)
                         _directBlocked.MarkBlocked(DateTime.UtcNow);
+                    else if (denied.Reason == XmaBlockReason.NeedsLogin)
+                        _needsLogin.Mark(modId, DateTime.UtcNow);   // 这条 mod 需要登录态，下次别再白撞
                     _plugin.Jobs.Note($"详情直连被拒（{denied.Reason}，{dSw.ElapsedMilliseconds} ms）→ 改走浏览器通道");
                 }
             }
             else
             {
-                _plugin.Jobs.Note("详情：直连在冷却期内，直接走浏览器通道");
+                _plugin.Jobs.Note(nsfwOnly
+                    ? "详情：「只看 NSFW」模式 → 直接走浏览器通道（直连看不到 NSFW 详情）"
+                    : knownNeedsLogin
+                        ? "详情：这条 Mod 已被证实需要登录态 → 直接走浏览器通道"
+                        : "详情：直连在冷却期内，直接走浏览器通道");
             }
 
             if (canFallBack)
@@ -2139,6 +2173,7 @@ public class MainWindow : Window
                             _detail = parsed;
                             _detailViaChannel = true;
                             _detailChannelReason = _form.NsfwMode != 0 ? "NSFW 模式（需登录态）" : "直连被拒";
+                            if (parsed.Title.Length > 0) _detailCache.Put(modId, parsed);
                             _plugin.Jobs.Note($"详情（通道）{cSw.ElapsedMilliseconds} ms：{parsed.Title}");
                             return;
                         }
@@ -2201,6 +2236,9 @@ public class MainWindow : Window
 
     private bool _detailViaChannel;
     private string _detailChannelReason = string.Empty;
+    // 详情短期缓存 + 「这条 mod 需要登录态」记忆（都是纯逻辑类，能离线自测）
+    private readonly DetailCache _detailCache = new();
+    private readonly NeedsLoginMemory _needsLogin = new();
     private string _viaChannelReason = string.Empty;
     private List<string> _diagLines = [];
     private List<KeyValuePair<string, string>> _diagMods = [];

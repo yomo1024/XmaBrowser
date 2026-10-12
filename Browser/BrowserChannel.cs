@@ -304,33 +304,69 @@ public sealed class BrowserChannel : IDisposable
     public Task<byte[]?> GetImageBytesAsync(string url, CancellationToken ct = default)
         => WithSessionAsync<byte[]>("取图", (s, token) => FetchImageCoreAsync(s, url, token), ct);
 
+    /// <summary>图片文档最多等这么久（毫秒）。原来是 120×250ms = 30 秒，实测失败也要白等 32270 ms，
+    /// 而且这段时间一直占着通道锁 —— 用户那边的表现就是「读详情/搜索被堵住」。</summary>
+    private const int ImageWaitMs = 6000;
+
     private async Task<byte[]?> FetchImageCoreAsync(Session s, string url, CancellationToken ct)
     {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         await s.Cdp.SendAsync("Page.enable", null, ct).ConfigureAwait(false);
         await s.Cdp.SendAsync("Page.navigate", new { url }, ct).ConfigureAwait(false);
 
-        // 等图片文档加载完（顶层是图片时，Chrome 会包一个 <img>）
-        for (var i = 0; i < 120; i++)
+        // 等图片文档就绪 —— 但**要同时看这是什么文档**。
+        // 关键教训（实测）：403 / 人机校验 / 错误页同样是「加载完成」，此时页面里根本没有 <img>，
+        // 只盯 img 会白等满 30 秒（实测 32270 ms）才失败。
+        // 所以把 document.contentType 一起取回来：text/* 就说明拿到的是一张网页，立刻收手。
+        const string probe =
+            "(()=>{const t=document.contentType||'';const i=document.querySelector('img');" +
+            "const ok=i&&i.complete&&i.naturalWidth>0?(i.naturalWidth+'x'+i.naturalHeight):'';" +
+            "return t+'|'+ok;})()";
+
+        var deadline = DateTime.UtcNow.AddMilliseconds(ImageWaitMs);
+        var ready = false;
+        string? badDoc = null;
+
+        while (DateTime.UtcNow < deadline)
         {
             ct.ThrowIfCancellationRequested();
-            var probe = await s.Cdp.SendAsync("Runtime.evaluate",
-                new { expression = "(()=>{const i=document.querySelector('img');return i&&i.complete&&i.naturalWidth>0?i.naturalWidth+'x'+i.naturalHeight:'';})()", returnByValue = true },
-                ct, 15_000).ConfigureAwait(false);
-            var v = CdpClient.Value(probe);
-            if (!string.IsNullOrEmpty(v)) break;
-            await Task.Delay(250, ct).ConfigureAwait(false);
+            var r = await s.Cdp.SendAsync("Runtime.evaluate",
+                new { expression = probe, returnByValue = true }, ct, 10_000).ConfigureAwait(false);
+            var v = CdpClient.Value(r) ?? string.Empty;
+            var parts = v.Split('|');
+            var contentType = parts.Length > 0 ? parts[0] : string.Empty;
+
+            if (parts.Length > 1 && parts[1].Length > 0) { ready = true; break; }
+
+            // 文档是网页（text/html、text/plain…）→ 不可能是图片，别等了
+            if (contentType.StartsWith("text/", StringComparison.OrdinalIgnoreCase))
+            {
+                badDoc = contentType;
+                break;
+            }
+            await Task.Delay(100, ct).ConfigureAwait(false);
+        }
+
+        if (!ready)
+        {
+            _lastError = badDoc is null
+                ? $"图片没在 {ImageWaitMs} ms 内就绪（站点可能很慢或在校验）"
+                : $"图片地址返回的是网页（{badDoc}，多半是 403 / 人机校验）";
+            _log.Warn($"浏览器通道取图失败：{_lastError}（{url[..Math.Min(60, url.Length)]}，{sw.ElapsedMilliseconds} ms）");
+            return null;
         }
 
         var expr = "(function(){const i=document.querySelector('img');if(!i||!i.naturalWidth)return '';" +
                    "const c=document.createElement('canvas');c.width=i.naturalWidth;c.height=i.naturalHeight;" +
                    "c.getContext('2d').drawImage(i,0,0);return c.toDataURL('image/jpeg',0.92);})()";
         var res = await s.Cdp.SendAsync("Runtime.evaluate",
-            new { expression = expr, returnByValue = true }, ct, 60_000).ConfigureAwait(false);
+            new { expression = expr, returnByValue = true }, ct, 20_000).ConfigureAwait(false);
         var dataUrl = CdpClient.Value(res);
 
         if (dataUrl is null || !dataUrl.StartsWith("data:image", StringComparison.OrdinalIgnoreCase))
         {
             _lastError = "浏览器没能读出图片内容";
+            _log.Warn($"浏览器通道取图失败：{_lastError}（{url[..Math.Min(60, url.Length)]}，{sw.ElapsedMilliseconds} ms）");
             return null;
         }
 
