@@ -720,8 +720,9 @@ public class MainWindow : Window
                     // 手动归组时没有站点类型信息（只有安装时才带）→ {type} 会算成 Other
                     var folder = GroupPath.BuildFolder(cfg.GroupTemplate, cfg.GroupPrefix, string.Empty, string.Empty,
                                                        string.Empty, name);
-                    var (ok, msg) = _plugin.Jobs.GroupOne(dir, name, folder);
+                    var (ok, msg, report) = _plugin.Jobs.GroupOneDetailed(dir, name, folder);
                     _diagResult = (ok ? "✅ " : "❌ ") + msg;
+                    _diagReport = report;
                     _diagLines = _plugin.Penumbra.DumpPaths();
                     foreach (var line in _diagLines)
                         Plugin.Log.Information("[XmaBrowser][诊断] " + line);
@@ -736,6 +737,20 @@ public class MainWindow : Window
         {
             ImGui.SameLine();
             ImGui.TextColored(_diagResult.StartsWith("❌") ? Red : Dim, _diagResult);
+        }
+
+        if (_diagReport.Length > 0)
+        {
+            ImGui.Spacing();
+            if (ImGui.Button("复制自检报告"))
+                ImGui.SetClipboardText(_diagReport);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("把这份报告发给开发者即可定位（含每一步的调用结果与读回路径）。");
+            ImGui.SameLine();
+            ImGui.TextColored(Dim, "自检报告（复制给我）");
+            ImGui.BeginChild("xma-diag-report", new Vector2(0, 130), true);
+            ImGui.TextWrapped(_diagReport);
+            ImGui.EndChild();
         }
     }
 
@@ -961,6 +976,7 @@ public class MainWindow : Window
     private List<KeyValuePair<string, string>> _diagMods = [];
     private int _diagIndex;
     private string _diagResult = string.Empty;
+    private string _diagReport = string.Empty;
 
     private static string Fmt(DateTime? t) => t?.ToString("yyyy-MM-dd HH:mm") ?? "-";
 

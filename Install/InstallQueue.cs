@@ -425,6 +425,10 @@ public sealed class InstallQueue : IDisposable
             if (success) ok++;
             done++;
             _log.Info($"归组【{job.Title}】：{(success ? "成功" : "失败")} — {message}");
+
+            // 移完回头看两次：Penumbra 的导入/重扫可能在之后按旧路径把节点放回去
+            ScheduleRecheck(dir, job.Title, folder, 5_000);
+            ScheduleRecheck(dir, job.Title, folder, 15_000);
         }
 
         if (ok > 0)
@@ -439,12 +443,29 @@ public sealed class InstallQueue : IDisposable
     /// </summary>
     public (bool Success, string Message) GroupOne(string dirOrName, string displayName, string folder)
     {
+        var (ok, msg, report) = GroupOneDetailed(dirOrName, displayName, folder);
+        _log.Info("[归组] " + report.Replace("\n", " ⏎ "));
+        return (ok, msg);
+    }
+
+    /// <summary>带完整自检报告的版本（报告可复制给开发者定位）。</summary>
+    public (bool Success, string Message, string Report) GroupOneDetailed(string dirOrName, string displayName,
+                                                                          string folder)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"Mod：dir={dirOrName} | name={displayName}");
+        sb.AppendLine($"目标文件夹：{(folder.Length > 0 ? folder : "(空)")}");
+
         if (string.IsNullOrWhiteSpace(folder))
-            return (false, "目标文件夹为空（模板没算出路径）");
+        {
+            sb.AppendLine("结果：目标文件夹为空（模板没算出路径）");
+            return (false, "目标文件夹为空（模板没算出路径）", sb.ToString());
+        }
 
         var modRoot = _penumbra.ModDirectory;
+        sb.AppendLine($"Penumbra mod 根目录：{modRoot}");
         if (string.IsNullOrEmpty(modRoot))
-            return (false, "拿不到 Penumbra 的 mod 目录");
+            return (false, "拿不到 Penumbra 的 mod 目录", sb.ToString());
 
         try
         {
@@ -456,18 +477,28 @@ public sealed class InstallQueue : IDisposable
         }
 
         var (curDir, curName) = ResolveMod(dirOrName, displayName);
+        sb.AppendLine($"定位到：dir={curDir} | name={curName}");
 
-        // 已经在目标文件夹里了？
         var before = _penumbra.GetPath(curDir, curName);
+        sb.AppendLine($"移动前：ec={before.Ec} 路径=\"{before.Path}\" 自定义路径={before.CustomPath} 自定义名={before.CustomName}");
+        sb.AppendLine($"列表快照（前）：{_penumbra.SnapshotList()}");
+
         if (GroupPath.PathUnderFolder(before.Path, folder))
-            return (true, $"已经在 {folder}/（{before.Path}）");
+        {
+            sb.AppendLine("结果：本来就在目标文件夹里，无需移动");
+            return (true, $"已经在 {folder}/（{before.Path}）", sb.ToString());
+        }
+
+        var candidates = GroupPath.CandidatePaths(folder, curDir, displayName);
+        sb.AppendLine($"候选路径：{string.Join(" | ", candidates)}");
 
         var last = "没有可尝试的路径形态";
-        foreach (var candidate in GroupPath.CandidatePaths(folder, curDir, displayName))
+        foreach (var candidate in candidates)
         {
             var result = _penumbra.SetPath(curDir, curName, candidate);
             if (result != "Success")
             {
+                sb.AppendLine($"  尝试 \"{candidate}\" → SetModPath={result}");
                 last = $"SetModPath(\"{candidate}\") → {result}";
                 continue;
             }
@@ -475,13 +506,55 @@ public sealed class InstallQueue : IDisposable
             // 读回验证（移动后节点名可能变了 → 按显示名重新定位）
             var (dir2, name2) = ResolveMod(curName, displayName);
             var after = _penumbra.GetPath(dir2, name2);
-            if (GroupPath.PathUnderFolder(after.Path, folder))
-                return (true, $"已归入 {folder}/（{after.Path}）");
+            sb.AppendLine($"  尝试 \"{candidate}\" → SetModPath=Success；读回 ec={after.Ec} 路径=\"{after.Path}\" " +
+                          $"自定义路径={after.CustomPath}");
 
-            last = $"SetModPath(\"{candidate}\") 返回 Success，但读回路径仍是 {after.Path}";
+            if (GroupPath.PathUnderFolder(after.Path, folder))
+            {
+                sb.AppendLine($"列表快照（后）：{_penumbra.SnapshotList()}");
+                sb.AppendLine("结果：成功");
+                return (true, $"已归入 {folder}/（{after.Path}）", sb.ToString());
+            }
+
+            last = $"SetModPath(\"{candidate}\") 返回 Success，但读回路径仍是 {(after.Path.Length > 0 ? after.Path : "(空, ec=" + after.Ec + ")")}";
         }
 
-        return (false, last);
+        sb.AppendLine($"列表快照（后）：{_penumbra.SnapshotList()}");
+        sb.AppendLine("结果：失败 — " + last);
+        return (false, last, sb.ToString());
+    }
+
+    /// <summary>
+    /// 延迟复核：Penumbra 的导入/重扫还在跑时，节点位置可能被它按**保存文件里旧的路径**放回去
+    /// （`ModFileSystemSaver.Load()` 会按 mod.Path.Folder 重建节点）。所以移完要回头看两次，被改回就再移一次。
+    /// </summary>
+    private void ScheduleRecheck(string dirOrName, string displayName, string folder, int delayMs)
+    {
+        var ct = _cts.Token;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delayMs, ct).ConfigureAwait(false);
+                var (dir, name) = ResolveMod(dirOrName, displayName);
+                var path = _penumbra.GetPath(dir, name);
+
+                if (GroupPath.PathUnderFolder(path.Path, folder))
+                {
+                    _log.Info($"[归组复核 {delayMs / 1000}s] 仍在 {folder}/（{path.Path}）");
+                    return;
+                }
+
+                _log.Warn($"[归组复核 {delayMs / 1000}s] 位置已变回 \"{path.Path}\"（ec={path.Ec}）—— 重新归组一次");
+                var (ok, msg, _) = GroupOneDetailed(dirOrName, displayName, folder);
+                _log.Info($"[归组复核 {delayMs / 1000}s] 重试结果：{(ok ? "成功" : "失败")} — {msg}");
+            }
+            catch (OperationCanceledException) { /* 卸载中 */ }
+            catch (Exception e)
+            {
+                _log.Debug($"[归组复核] 出错：{e.Message}");
+            }
+        }, ct);
     }
 
     /// <summary>在 Penumbra 的 mod 列表里定位一个 Mod：先按目录名，再按路径尾段，最后按显示名。</summary>

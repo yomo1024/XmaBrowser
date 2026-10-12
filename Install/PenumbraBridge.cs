@@ -168,6 +168,13 @@ public sealed class PenumbraBridge : IDisposable, Cover.CoverContext
         return lines;
     }
 
+    /// <summary>当前 mod 列表的紧凑快照（dir=name; dir=name; …），用于对比"移动前后标识是否变了"。</summary>
+    public string SnapshotList()
+    {
+        var mods = Mods();
+        return string.Join("; ", mods.Select(kv => $"{kv.Key}={kv.Value}"));
+    }
+
     public string Reload(string modDirectory, string modName)
         => Call(nameof(Reload), () => _reloadMod.Invoke(modDirectory, modName).ToString());
 
