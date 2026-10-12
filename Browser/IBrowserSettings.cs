@@ -12,4 +12,7 @@ public interface IBrowserSettings
     bool AutoPickProfile { get; }
     int BrowserTimeoutSec { get; }
     bool CleanupBorrowedProfile { get; }
+
+    /// <summary>通道空闲多少分钟后关掉 headless 浏览器释放内存（0 = 一直留着）。</summary>
+    int ChannelIdleMinutes { get; }
 }

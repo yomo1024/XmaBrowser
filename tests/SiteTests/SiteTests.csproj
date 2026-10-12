@@ -24,6 +24,8 @@
     <Compile Include="..\..\Site\XmaModels.cs" />
     <Compile Include="..\..\Site\XmaBlock.cs" />
     <Compile Include="..\..\Site\SearchRouting.cs" />
+    <Compile Include="..\..\Site\SearchCache.cs" />
+    <Compile Include="..\..\Site\DirectBlockMemory.cs" />
     <Compile Include="..\..\Site\LoginStateDetector.cs" />
     <Compile Include="..\..\Site\XmaParser.cs" />
     <Compile Include="..\..\Site\XmaClient.cs" />

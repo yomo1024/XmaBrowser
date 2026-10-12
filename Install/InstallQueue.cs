@@ -102,6 +102,9 @@ public sealed class InstallQueue : IDisposable
         get { lock (_diagLog) return _diagLog.ToArray(); }
     }
 
+    /// <summary>给别的模块写诊断日志用（如浏览/详情耗时）。</summary>
+    public void Note(string line) => LogDiag(line);
+
     private void LogDiag(string line)
     {
         lock (_diagLog)

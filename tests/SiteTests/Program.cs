@@ -20,6 +20,8 @@ var live = args.Contains("live");
 var translateOnly = args.Contains("translate");
 var nsfwProbe = args.Contains("nsfw");
 var nsfwDiag = args.Contains("nsfwdiag");
+var timingProbe = args.Contains("timing");
+var oneCheck = args.Contains("one");
 var authorProbe = args.Contains("author");
 var pass = 0;
 var fail = 0;
@@ -518,6 +520,76 @@ Console.WriteLine("=== 13e. 界面缩放取值规则 ===");
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 13f. 搜索结果短期缓存 ===");
+{
+    var cache = new SearchCache(ttlSeconds: 2, capacity: 3);
+    var urlA = "https://www.xivmodarchive.com/search?nsfw=false&page=1";
+    var urlB = "https://www.xivmodarchive.com/search?nsfw=false&page=2";
+
+    Check("空缓存查不到", !cache.TryGet(urlA, out _));
+    cache.Put(urlA, new SearchResult { TotalMods = 53281, Hits = [new SearchHit { ModId = "1" }] });
+    Check("放进去就能查到", cache.TryGet(urlA, out var got) && got.TotalMods == 53281 && got.Hits.Count == 1);
+    Check("不同 URL 不串（分页/筛选各自独立）", !cache.TryGet(urlB, out _));
+    Check("键就是完整 URL", SearchCache.KeyFor("  " + urlA + "  ") == urlA);
+
+    cache.Put(urlB, new SearchResult { TotalMods = 1 });
+    cache.Put("u3", new SearchResult { TotalMods = 3 });
+    cache.Put("u4", new SearchResult { TotalMods = 4 });
+    Check("超出容量会淘汰（不无限涨）", cache.Count <= 3, cache.Count.ToString());
+
+    // TTL：等过期
+    var tiny = new SearchCache(ttlSeconds: 1, capacity: 4);
+    tiny.Put("x", new SearchResult { TotalMods = 9 });
+    Check("TTL 内命中", tiny.TryGet("x", out _));
+    Thread.Sleep(1200);
+    Check("TTL 过期后失效", !tiny.TryGet("x", out _));
+
+    var off = new SearchCache(ttlSeconds: 0, capacity: 4);
+    off.Put("y", new SearchResult());
+    Check("TTL=0 = 关闭缓存", !off.TryGet("y", out _) && off.Count == 0);
+
+    Check("空 URL 不缓存", !new SearchCache().TryGet("", out _));
+}
+
+Console.WriteLine();
+Console.WriteLine("=== 13g. 直连被人机校验后的冷却记忆 ===");
+{
+    var mem = new DirectBlockMemory(TimeSpan.FromMinutes(5));
+    var t0 = new DateTime(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
+
+    Check("初始不冷却", !mem.IsBlocked(t0) && mem.Describe(t0).Length == 0);
+    mem.MarkBlocked(t0);
+    Check("标记后进入冷却", mem.IsBlocked(t0) && mem.IsBlocked(t0.AddMinutes(4)));
+    Check("冷却描述带剩余分钟", mem.Describe(t0.AddMinutes(1)).Contains("4 分钟"),
+          mem.Describe(t0.AddMinutes(1)));
+    Check("到点自动恢复", !mem.IsBlocked(t0.AddMinutes(5)) && !mem.IsBlocked(t0.AddMinutes(6)));
+    Check("恢复后描述为空", mem.Describe(t0.AddMinutes(9)).Length == 0);
+
+    mem.MarkBlocked(t0.AddMinutes(10));
+    mem.MarkHealthy();
+    Check("直连成功后立刻清掉冷却", !mem.IsBlocked(t0.AddMinutes(10)));
+
+    var shortMem = new DirectBlockMemory(TimeSpan.FromSeconds(30));
+    shortMem.MarkBlocked(t0);
+    Check("自定义冷却时长生效", shortMem.IsBlocked(t0.AddSeconds(29)) && !shortMem.IsBlocked(t0.AddSeconds(31)));
+}
+
+Console.WriteLine();
+Console.WriteLine("=== 13h. 挑战页/空页识别（浏览器通道取页面是否可用）===");
+{
+    // 挑战页实测约 29KB —— 不能只按“小/空”判断，否则会把挑战页当成正常的“没有结果”。
+    var challenge = "<html><head><title>Just a moment...</title></head><body><div id=\"cf-chl\"></div>" +
+                    new string(' ', 30000) + "</body></html>";
+    Check("挑战页（29KB）判定为不可用", !BrowserChannel.IsUsablePage(challenge));
+    Check("空文档判定为不可用", !BrowserChannel.IsUsablePage("<html><body></body></html>"));
+    Check("null 判定为不可用", !BrowserChannel.IsUsablePage(null));
+    Check("过短页面判定为不可用", !BrowserChannel.IsUsablePage(new string('x', 199)));
+
+    var realPage = "<html><body>" + string.Concat(Enumerable.Repeat("<div class=\"mod-card bg-dark\"></div>", 15)) + "</body></html>";
+    Check("正常页面（含卡片）判定为可用", BrowserChannel.IsUsablePage(realPage));
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 13. 翻译：分段逻辑（离线）===");
 {
     var para = string.Join("\n", Enumerable.Range(0, 40).Select(i => $"This is sentence number {i} of the description."));
@@ -804,6 +876,137 @@ if (authorProbe)
     }
 }
 
+if (timingProbe)
+{
+    Console.WriteLine();
+    Console.WriteLine("=== 15. 耗时实测（直连 vs 浏览器通道）===");
+    var tSettings = new TestSettings();
+    var tCache = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "timing");
+    Directory.CreateDirectory(tCache);
+    using var tHttp = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+    using var tClient = new XmaClient(tHttp, tSettings, tCache, new NullLog());
+    using var tChannel = new BrowserChannel(tSettings, new NullLog());
+
+    async Task TimeIt(string label, Func<Task<string>> run)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        string note;
+        try
+        {
+            var text = await run();
+            note = $"{text.Length} 字节";
+        }
+        catch (Exception e)
+        {
+            note = "失败：" + e.Message;
+        }
+        sw.Stop();
+        Console.WriteLine($"   {label,-34} {sw.ElapsedMilliseconds,7} ms   {note}");
+    }
+
+    var searchUrl = XmaUrls.Search(new SearchQuery { Page = 1, NsfwMode = 1 });
+    var modUrl = XmaUrls.ModPage("95080");
+
+    Console.WriteLine($"   搜索 URL（混合，无 nsfw 参数）前 60 字：{searchUrl[..Math.Min(60, searchUrl.Length)]}");
+    Console.WriteLine();
+
+    for (var i = 1; i <= 3; i++)
+        await TimeIt($"直连 搜索 #{i}", () => tClient.SearchAsync(new SearchQuery { Page = 1, NsfwMode = 1 },
+                                                                   CancellationToken.None).ContinueWith(t => t.Result.Hits.Count.ToString()));
+
+    Console.WriteLine();
+    await TimeIt("通道 搜索 #1（冷：要起浏览器）", async () =>
+    {
+        var h = await tChannel.GetHtmlAsync(searchUrl, CancellationToken.None);
+        if (h is null) return "失败：" + tChannel.LastError;
+        var parsed = XmaParser.ParseSearch(h, 1, searchUrl);
+        return $"HTML {h.Length} 字节 → 解析 {parsed.Hits.Count} 条（总数 {parsed.TotalMods}）";
+    });
+    for (var i = 2; i <= 3; i++)
+        await TimeIt($"通道 搜索 #{i}（会话复用）", async () =>
+        {
+            var h = await tChannel.GetHtmlAsync(searchUrl, CancellationToken.None);
+            if (h is null) return "失败：" + tChannel.LastError;
+            var parsed = XmaParser.ParseSearch(h, 1, searchUrl);
+            return $"HTML {h.Length} 字节 → 解析 {parsed.Hits.Count} 条（总数 {parsed.TotalMods}）";
+        });
+
+    Console.WriteLine();
+    for (var i = 1; i <= 2; i++)
+        await TimeIt($"直连 详情 #{i}（modid/95080）", () => tClient.DetailAsync("95080", CancellationToken.None)
+                                                                   .ContinueWith(t => t.Result.Title));
+    await TimeIt("通道 详情（modid/95080）", async () =>
+    {
+        var h = await tChannel.GetHtmlAsync(modUrl, CancellationToken.None);
+        return h is null ? "失败：" + tChannel.LastError : $"HTML {h.Length} 字节";
+    });
+
+    Console.WriteLine();
+    var thumbs = (await tClient.SearchAsync(new SearchQuery { Page = 1, NsfwMode = 1 }, CancellationToken.None))
+                 .Hits.Select(h => h.ThumbUrl).Where(u => u.Length > 0).Take(6).ToList();
+    Console.WriteLine($"   下载 {thumbs.Count} 张缩略图（并发）…");
+    var tsw = System.Diagnostics.Stopwatch.StartNew();
+    var tTasks = thumbs.Select(async u =>
+    {
+        try
+        {
+            var bytes = await tHttp.GetByteArrayAsync(u);
+            return bytes.Length;
+        }
+        catch
+        {
+            return -1;
+        }
+    }).ToArray();
+    var sizes = await Task.WhenAll(tTasks);
+    tsw.Stop();
+    Console.WriteLine($"   缩略图 {thumbs.Count} 张 并发用时 {tsw.ElapsedMilliseconds} ms（合计 {sizes.Where(s => s > 0).Sum()} 字节）");
+}
+
+if (oneCheck)
+{
+    // 最小实测：一共只发 2 个请求（1 直连 + 1 通道），避免把站点打急。
+    Console.WriteLine();
+    Console.WriteLine("=== 16. 单次最小实测（1 直连 + 1 通道）===");
+    var oSettings = new TestSettings();
+    var oCache = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "one");
+    Directory.CreateDirectory(oCache);
+    using var oHttp = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+    using var oClient = new XmaClient(oHttp, oSettings, oCache, new NullLog());
+    using var oChannel = new BrowserChannel(oSettings, new NullLog());
+    var oUrl = XmaUrls.Search(new SearchQuery { Page = 1, NsfwMode = 1 });
+
+    var oSw = System.Diagnostics.Stopwatch.StartNew();
+    try
+    {
+        var r = await oClient.SearchAsync(new SearchQuery { Page = 1, NsfwMode = 1 }, CancellationToken.None);
+        oSw.Stop();
+        Console.WriteLine($"   直连：{oSw.ElapsedMilliseconds} ms → {r.Hits.Count} 条（总数 {r.TotalMods}）");
+    }
+    catch (Exception e)
+    {
+        oSw.Stop();
+        var msg = e.Message;
+        Console.WriteLine($"   直连：{oSw.ElapsedMilliseconds} ms → 失败：{msg[..Math.Min(60, msg.Length)]}");
+    }
+
+    oSw.Restart();
+    var oHtml = await oChannel.GetHtmlAsync(oUrl, CancellationToken.None);
+    oSw.Stop();
+    if (oHtml is null)
+    {
+        Console.WriteLine($"   通道：{oSw.ElapsedMilliseconds} ms → 失败：{oChannel.LastError}");
+    }
+    else
+    {
+        var p = XmaParser.ParseSearch(oHtml, 1, oUrl);
+        Console.WriteLine($"   通道：{oSw.ElapsedMilliseconds} ms → HTML {oHtml.Length} 字节，解析 {p.Hits.Count} 条（总数 {p.TotalMods}）");
+        Console.WriteLine(p.Hits.Count >= 15
+            ? "   ✓ 通道拿到了完整一页（15 条）"
+            : "   ⚠ 通道只拿到部分/空页 —— 站点大概在挑战或限流这个 IP");
+    }
+}
+
 Console.WriteLine();
 Console.WriteLine($"==== 结果：通过 {pass}，失败 {fail} ====");
 return fail == 0 ? 0 : 1;
@@ -836,4 +1039,5 @@ internal sealed class TestSettings : IXmaSettings, IBrowserSettings
     public bool AutoPickProfile => true;
     public int BrowserTimeoutSec => 180;
     public bool CleanupBorrowedProfile => true;
+    public int ChannelIdleMinutes => 0;      // 测试里别自动关，避免影响多次连续调用
 }

@@ -42,6 +42,9 @@ public sealed class BrowserChannel : IDisposable
 
     private Session? _session;
     private string _lastError = string.Empty;
+    private readonly SemaphoreSlim _opLock = new(1, 1);   // 通道操作串行（共用一个标签页）
+    private volatile bool _disposed;
+    private DateTime _lastOpUtc = DateTime.MinValue;
 
     public string LastError => _lastError;
 
@@ -84,43 +87,174 @@ public sealed class BrowserChannel : IDisposable
     /// <summary>哪些候选浏览器里真的有 xivmodarchive 的登录态（用来优先挑）。</summary>
     public static List<BrowserCandidate> DetectUsable() => Detect().Where(c => c.LooksUsable).ToList();
 
-    public async Task<string?> GetHtmlAsync(string url, CancellationToken ct = default)
+    /// <summary>
+    /// 按 URL 猜「页面可用的标志元素」：搜索页看有没有卡片、详情页看下载链/标题、其它看 body。
+    /// 用它判断「可以取 HTML 了」，比死等 readyState=complete 快得多（站点带广告脚本）。
+    /// </summary>
+    internal static string WaitSelectorFor(string url)
     {
-        var s = await GetSessionAsync(ct).ConfigureAwait(false);
-        if (s is null) return null;
+        if (url.Contains("/search", StringComparison.OrdinalIgnoreCase)) return ".mod-card";
+        if (url.Contains("/modid/", StringComparison.OrdinalIgnoreCase)) return "#mod-download-link, h1.display-5";
+        return "body";
+    }
 
+    /// <summary>
+    /// 在浏览器会话上跑一个操作。两层保护：
+    ///   1) **串行**：通道里所有操作共用同一个标签页，并发导航会互相打断（还会让对方读到错的页面）；
+    ///   2) **自愈**：遇到 <see cref="CdpClosedException"/>（连接被关 / 被 Dispose / 浏览器进程没了）
+    ///      就丢弃会话重建一次再试 —— 这正是 "WebSocket is in an invalid state ('Aborted')" 的修复路径。
+    /// </summary>
+    private async Task<T?> WithSessionAsync<T>(string what, Func<Session, CancellationToken, Task<T?>> op,
+                                               CancellationToken ct) where T : class
+    {
+        if (_disposed) return null;
+
+        await _opLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            // 空闲太久先把浏览器关掉：headless Chrome 常驻占上百 MB，闲着不划算。
+            // 没有后台定时器，就在下一次要用通道时判断一次（简单、无额外线程）。
+            var idleMinutes = _cfg.ChannelIdleMinutes;
+            if (idleMinutes > 0 && _session is not null &&
+                (DateTime.UtcNow - _lastOpUtc).TotalMinutes >= idleMinutes)
+            {
+                _log.Info($"浏览器通道空闲 {idleMinutes} 分钟 → 关闭会话释放内存");
+                DropSessionIfAny();
+            }
+
+            for (var attempt = 1; attempt <= 2; attempt++)
+            {
+                var s = await GetSessionAsync(ct).ConfigureAwait(false);
+                if (s is null) return null;
+
+                try
+                {
+                    var value = await op(s, ct).ConfigureAwait(false);
+                    _lastOpUtc = DateTime.UtcNow;
+                    if (value is not null) _lastError = string.Empty;   // 成功了就把上次的错误清掉
+                    return value;
+                }
+                catch (CdpClosedException e)
+                {
+                    _lastError = $"{what}：CDP 连接中断（{e.Message}）";
+                    _log.Warn($"浏览器通道 {what} → {_lastError}；" +
+                              (attempt == 1 ? "丢弃会话重建后重试" : "重建后仍失败"));
+                    DropSession(s);
+                    if (attempt == 2) return null;
+                }
+            }
+            return null;
+        }
+        finally
+        {
+            _opLock.Release();
+        }
+    }
+
+    /// <summary>丢弃指定会话（只清掉还指向它的字段，然后释放它）。</summary>
+    private void DropSession(Session session)
+    {
+        if (ReferenceEquals(_session, session)) _session = null;
+        try { session.Dispose(); } catch { /* 忽略 */ }
+    }
+
+    /// <summary>取页面 HTML（自动串行 + 断线自愈）。</summary>
+    public Task<string?> GetHtmlAsync(string url, CancellationToken ct = default)
+        => WithSessionAsync<string>("取页面", (s, token) => FetchHtmlCoreAsync(s, url, token), ct);
+
+    private async Task<string?> FetchHtmlCoreAsync(Session s, string url, CancellationToken ct)
+    {
+        // 取页面「不算成功」的两种情形（实测都会出现，别当成“没有结果”）：
+        //   · 空文档（几十字节）—— 导航没渲染出来
+        //   · Cloudflare 挑战页（Just a moment，实测约 29KB！）—— 站点在做人机校验/限流
+        // 两种都重试一次：挑战页常常过几秒自己就放行了。
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            var outer = await NavigateAndGrabAsync(s, url, ct).ConfigureAwait(false);
+            if (IsUsablePage(outer))
+                return outer;
+
+            var why = LoginStateDetector.LooksLikeChallenge(outer)
+                ? "站点在做 Cloudflare 人机校验（页面是 Just a moment）"
+                : $"页面没取到内容（{outer?.Length ?? 0} 字节）";
+            _lastError = $"{why} —— 这不等于“没有结果”；稍后再试";
+            _log.Warn($"浏览器通道取页面第 {attempt} 次没成功：{_lastError}（{url[..Math.Min(60, url.Length)]}）");
+
+            if (attempt == 1) await Task.Delay(2500, ct).ConfigureAwait(false);   // 给挑战页一点时间自己放行
+        }
+        return null;
+    }
+
+    /// <summary>取回来的页面能不能用：不空、也不是 Cloudflare 挑战页。</summary>
+    internal static bool IsUsablePage(string? html)
+        => html is { Length: >= 200 } && !LoginStateDetector.LooksLikeChallenge(html);
+
+    private async Task<string?> NavigateAndGrabAsync(Session s, string url, CancellationToken ct)
+    {
         await s.Cdp.SendAsync("Page.enable", null, ct).ConfigureAwait(false);
         await s.Cdp.SendAsync("Page.navigate", new { url }, ct).ConfigureAwait(false);
 
-        // 等导航真的落在目标地址上并且加载完成（避免读到上一页）
-        for (var i = 0; i < 120; i++)
+        // 等「够用」而不是「彻底加载完」：
+        // 站点带广告脚本（s.nitropay 等），readyState 到 complete 常要拖好几秒；
+        // 我们只解析 DOM，所以等到「URL 落到目标 + 不是 loading + 关键元素出现」就收工。
+        // 关键元素没出现也给个软上限（2.5s），别把没有该元素的页面卡死；硬上限 5s。
+        var key = url.Split('?')[0];
+        var selector = WaitSelectorFor(url);
+        // 搜索页要等**够 15 张卡片**（站点一页 15 条）再取，否则可能只拿到半页；
+        // 其它页面有 1 个关键元素就算够。
+        var needCount = selector == ".mod-card" ? 15 : 1;
+        // 多带一个 document.title：挑战页的标题就是 "Just a moment..."，可以立刻认出来别再干等。
+        var readyExpr = "location.href + '|' + document.readyState + '|' + " +
+                        $"document.querySelectorAll('{selector}').length + '|' + document.title";
+        var hardDeadline = DateTime.UtcNow.AddSeconds(6);
+        var softDeadline = DateTime.UtcNow.AddMilliseconds(2500);
+        var emptyDeadline = DateTime.UtcNow.AddMilliseconds(1200);
+
+        while (DateTime.UtcNow < hardDeadline)
         {
             ct.ThrowIfCancellationRequested();
             var r = await s.Cdp.SendAsync("Runtime.evaluate",
-                new { expression = "location.href + '|' + document.readyState", returnByValue = true }, ct, 15_000)
-                .ConfigureAwait(false);
-            var v = CdpClient.Value(r) ?? "";
+                new { expression = readyExpr, returnByValue = true }, ct, 15_000).ConfigureAwait(false);
+            var v = CdpClient.Value(r) ?? string.Empty;
             var parts = v.Split('|');
-            if (parts.Length == 2 && parts[1] == "complete" && parts[0].StartsWith(url.Split('?')[0], StringComparison.OrdinalIgnoreCase))
+            var urlMatched = parts.Length >= 3 && parts[0].StartsWith(key, StringComparison.OrdinalIgnoreCase);
+
+            // 一认出挑战页就立刻收手（别白等 6 秒）——让上层去重试/报因
+            if (urlMatched && parts.Length >= 4 && LoginStateDetector.LooksLikeChallenge(parts[3]))
                 break;
-            await Task.Delay(250, ct).ConfigureAwait(false);
+
+            if (urlMatched && parts[1] != "loading")
+            {
+                var count = int.TryParse(parts[2], out var n) ? n : 0;
+                // 注意：**不能**拿 readyState==complete 当收工条件 —— Page.navigate 之后会短暂存在
+                // 一个「已完成但内容为空」的文档（实测抓到过 28 字节），那样会解析出 0 条。
+                if (count >= needCount) break;
+                if (count > 0 && DateTime.UtcNow >= softDeadline) break;
+                // 完事了却一张卡片都没有（且给过一小会儿）→ 别再干等，交给上层的重试
+                if (count == 0 && parts[1] == "complete" && DateTime.UtcNow >= emptyDeadline) break;
+                if (DateTime.UtcNow >= hardDeadline) break;
+            }
+            await Task.Delay(120, ct).ConfigureAwait(false);
         }
 
         var html = await s.Cdp.SendAsync("Runtime.evaluate",
             new { expression = "document.documentElement.outerHTML", returnByValue = true }, ct, 60_000)
             .ConfigureAwait(false);
         var outer = CdpClient.Value(html);
-        _log.Info($"浏览器通道取页面 {url[..Math.Min(60, url.Length)]}… → {(outer?.Length ?? 0)} 字节");
+        var took = DateTime.UtcNow - hardDeadline.AddSeconds(-5);   // 从进入本方法算起的大致耗时
+        _log.Info($"浏览器通道取页面 {url[..Math.Min(60, url.Length)]}… → {outer?.Length ?? 0} 字节（约 {took.TotalMilliseconds:0} ms）");
         return outer;
     }
 
     /// <summary>让浏览器以「真实下载」的方式取文件（NSFW 的包只有这条路能拿）。</summary>
     public async Task<bool> DownloadAsync(string url, string destFile, Action<long, long>? progress,
                                           CancellationToken ct = default)
-    {
-        var s = await GetSessionAsync(ct).ConfigureAwait(false);
-        if (s is null) return false;
+        => await WithSessionAsync<string>("下载",
+                (s, token) => DownloadCoreAsync(s, url, destFile, progress, token), ct).ConfigureAwait(false) is not null;
 
+    private async Task<string?> DownloadCoreAsync(Session s, string url, string destFile,
+                                                  Action<long, long>? progress, CancellationToken ct)
+    {
         Directory.CreateDirectory(s.DownloadDir);
         await s.Cdp.SendAsync("Browser.setDownloadBehavior",
             new { behavior = "allow", downloadPath = s.DownloadDir, eventsEnabled = true }, ct).ConfigureAwait(false);
@@ -147,19 +281,19 @@ public sealed class BrowserChannel : IDisposable
                 catch (Exception e)
                 {
                     _lastError = $"下载完成但搬运失败：{e.Message}";
-                    return false;
+                    return null;
                 }
 
                 progress?.Invoke(size, size);
                 _log.Info($"浏览器通道下载完成：{Path.GetFileName(destFile)} {size} 字节");
-                return true;
+                return "ok";
             }
             await Task.Delay(400, ct).ConfigureAwait(false);
         }
 
         _lastError = $"浏览器通道下载超时（{_cfg.BrowserTimeoutSec} 秒）：{url}";
         _log.Warn(_lastError);
-        return false;
+        return null;
     }
 
     /// <summary>
@@ -167,11 +301,11 @@ public sealed class BrowserChannel : IDisposable
     /// 这里刻意走「真实浏览器」：站点全尺寸图在 Cloudflare 后面，直连会 403；
     /// 顺带把 WebP 之类统一成 JPEG —— Dalamud 的贴图加载不认 WebP。
     /// </summary>
-    public async Task<byte[]?> GetImageBytesAsync(string url, CancellationToken ct = default)
-    {
-        var s = await GetSessionAsync(ct).ConfigureAwait(false);
-        if (s is null) return null;
+    public Task<byte[]?> GetImageBytesAsync(string url, CancellationToken ct = default)
+        => WithSessionAsync<byte[]>("取图", (s, token) => FetchImageCoreAsync(s, url, token), ct);
 
+    private async Task<byte[]?> FetchImageCoreAsync(Session s, string url, CancellationToken ct)
+    {
         await s.Cdp.SendAsync("Page.enable", null, ct).ConfigureAwait(false);
         await s.Cdp.SendAsync("Page.navigate", new { url }, ct).ConfigureAwait(false);
 
@@ -218,9 +352,22 @@ public sealed class BrowserChannel : IDisposable
 
     private async Task<Session?> GetSessionAsync(CancellationToken ct)
     {
-        if (_session is { Alive: true }) return _session;
-        _session?.Dispose();
-        _session = null;
+        // 关键：不只看「进程还在」，还要看 **CDP 连接还活着**。
+        // 只看进程的话，连接一旦断掉（浏览器崩了 / 连接被关 / 中途被 Dispose），
+        // 就会一直复用死会话 → 每次调用都抛
+        // "WebSocketException: The WebSocket is in an invalid state ('Aborted')"（主人报过）。
+        if (_session is { Usable: true } alive) return alive;
+        if (_session is { } dead)
+        {
+            _log.Warn("浏览器通道：上一个会话已失效（进程结束或 CDP 连接断开），重建一个新会话");
+            DropSession(dead);
+        }
+
+        if (_disposed)
+        {
+            _lastError = "浏览器通道已关闭";
+            return null;
+        }
 
         if (!Enabled)
         {
@@ -313,9 +460,17 @@ public sealed class BrowserChannel : IDisposable
 
     public void Dispose()
     {
-        _session?.Dispose();
-        _session = null;
+        _disposed = true;
+        DropSessionIfAny();
         _http.Dispose();
+        // 刻意不 Dispose _opLock：万一还有操作在持有它，释放时会抛 ObjectDisposedException。
+        // 一个 SemaphoreSlim 随插件卸载一起回收，代价可以忽略。
+    }
+
+    private void DropSessionIfAny()
+    {
+        if (_session is { } s) DropSession(s);
+        _session = null;
     }
 
     /// <summary>一次浏览器会话：临时 profile + headless 进程 + CDP 连接。</summary>
@@ -336,6 +491,13 @@ public sealed class BrowserChannel : IDisposable
                 catch { return false; }
             }
         }
+
+        /// <summary>
+        /// 这个会话还能不能用：进程活着 **并且** CDP WebSocket 还是 Open。
+        /// 只看进程是不够的 —— 连接可能先断（浏览器崩 / 连接被关 / 被 Dispose），
+        /// 那样继续复用就会一路抛 "invalid state ('Aborted')"。
+        /// </summary>
+        public bool Usable => Alive && Cdp.IsOpen;
 
         private Session(Process process, CdpClient cdp, string profileDir, string downloadDir, bool cleanup, IXmaLog log)
         {

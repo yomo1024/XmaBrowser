@@ -9,6 +9,16 @@ using System.Threading.Tasks;
 namespace XmaBrowser.Browser;
 
 /// <summary>
+/// CDP 连接已断（浏览器进程没了 / 连接被关 / 中途被 Dispose）。
+/// 调用方应**丢弃会话重建**，而不是把原始 WebSocketException 抛给用户
+/// （主人报过：WebSocketException: The WebSocket is in an invalid state ('Aborted')）。
+/// </summary>
+internal sealed class CdpClosedException : Exception
+{
+    public CdpClosedException(string message, Exception? inner = null) : base(message, inner) { }
+}
+
+/// <summary>
 /// 极简 Chrome DevTools Protocol 客户端（ClientWebSocket + System.Text.Json，无第三方依赖）。
 /// 只用到三件事：取 Cookie、取页面 HTML、让浏览器真实下载一个文件。
 /// </summary>
@@ -17,8 +27,20 @@ internal sealed class CdpClient : IDisposable
     private readonly ClientWebSocket _ws;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private int _nextId;
+    private volatile bool _dead;
 
     private CdpClient(ClientWebSocket ws) => _ws = ws;
+
+    /// <summary>连接是否还能用（发之前必须看它，否则就是在往已死的 socket 上写）。</summary>
+    public bool IsOpen
+    {
+        get
+        {
+            if (_dead) return false;
+            try { return _ws.State == WebSocketState.Open; }
+            catch { return false; }
+        }
+    }
 
     public static async Task<CdpClient> ConnectAsync(string wsUrl, CancellationToken ct)
     {
@@ -34,13 +56,28 @@ internal sealed class CdpClient : IDisposable
     public async Task<JsonElement> SendAsync(string method, object? parameters, CancellationToken ct,
                                              int timeoutMs = 60_000)
     {
+        if (!IsOpen)
+            throw new CdpClosedException("CDP 连接不可用（连接已关闭或已被释放）");
+
         await _lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            if (!IsOpen)
+                throw new CdpClosedException("CDP 连接不可用（连接已关闭或已被释放）");
+
             var id = Interlocked.Increment(ref _nextId);
             var payload = JsonSerializer.Serialize(new { id, method, @params = parameters });
             var bytes = Encoding.UTF8.GetBytes(payload);
-            await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+
+            try
+            {
+                await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+            }
+            catch (Exception e) when (IsClosedFailure(e))
+            {
+                _dead = true;
+                throw new CdpClosedException($"发送 {method} 时连接中断：{e.Message}", e);
+            }
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(timeoutMs);
@@ -59,6 +96,9 @@ internal sealed class CdpClient : IDisposable
             _lock.Release();
         }
     }
+
+    private static bool IsClosedFailure(Exception e)
+        => e is WebSocketException or ObjectDisposedException or InvalidOperationException;
 
     /// <summary>从 Runtime.evaluate 的应答里取字符串值；出错返回 null。</summary>
     public static string? Value(JsonElement response)
@@ -80,9 +120,23 @@ internal sealed class CdpClient : IDisposable
         using var ms = new MemoryStream();
         while (true)
         {
-            var r = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
+            WebSocketReceiveResult r;
+            try
+            {
+                r = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
+            }
+            catch (Exception e) when (IsClosedFailure(e))
+            {
+                _dead = true;
+                throw new CdpClosedException($"接收数据时连接中断：{e.Message}", e);
+            }
+
             if (r.MessageType == WebSocketMessageType.Close)
-                throw new IOException("CDP 连接被关闭");
+            {
+                _dead = true;
+                throw new CdpClosedException("CDP 连接被浏览器关闭");
+            }
+
             ms.Write(buffer, 0, r.Count);
             if (r.EndOfMessage) break;
         }
@@ -91,6 +145,7 @@ internal sealed class CdpClient : IDisposable
 
     public void Dispose()
     {
+        _dead = true;
         try { _ws.Dispose(); } catch { /* 忽略 */ }
         _lock.Dispose();
     }

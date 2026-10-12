@@ -165,6 +165,13 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
     /// <summary>用完是否删除临时 profile（里面含 cookie 副本，建议保持开启）。</summary>
     public bool CleanupBorrowedProfile { get; set; } = true;
 
+    /// <summary>
+    /// 浏览器通道空闲多少分钟后关掉那个 headless 浏览器（0 = 一直留着）。
+    /// headless Chrome 常驻占上百 MB 内存，闲着就关掉更符合这台机器的习惯；
+    /// 代价是下次用要重新启动一次（约几秒）。
+    /// </summary>
+    public int ChannelIdleMinutes { get; set; } = 5;
+
     // ---------------- 行为细节 ----------------
 
     /// <summary>列表里双击条目 = 安装（关掉则双击只展开详情）。</summary>
