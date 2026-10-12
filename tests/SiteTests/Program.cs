@@ -410,6 +410,10 @@ Console.WriteLine("=== 13. 翻译：分段逻辑（离线）===");
     Check("谷歌解析：多段按序拼接且保留换行", g2 == "第一段。\n第二行。\n\n第三段。", g2.Replace("\n", "\\n"));
 
     Check("谷歌解析：坏输入不抛异常", Translator.ReadGoogleTranslation("not json at all") == "");
+
+    // 插件实际会用哪个代理（= .NET 解析结果；谷歌能不能通就靠它）
+    Console.WriteLine($"   .NET 实际给谷歌用的代理：{ProxyInfo.Describe()}");
+    Check("代理探测不抛异常且给出结论", ProxyInfo.Describe().Length > 0);
 }
 
 if (live)

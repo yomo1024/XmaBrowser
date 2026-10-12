@@ -11,6 +11,7 @@ using Dalamud.Interface.Windowing;
 using XmaBrowser.Browser;
 using XmaBrowser.Install;
 using XmaBrowser.Site;
+using XmaBrowser.Translate;
 using XmaBrowser.Ui;
 
 namespace XmaBrowser.Windows;
@@ -311,20 +312,22 @@ public class MainWindow : Window
                              "详情描述：在右侧点「翻译标题+描述」，或开着自动翻译。");
     }
 
-    /// <summary>设置页的「测试翻译」：翻一句固定的英文并回报结果/错误。</summary>
+    /// <summary>设置页的「测试翻译」：翻一句固定的英文并回报结果/错误（带上代理现状，好定位）。</summary>
     private void TestTranslation()
     {
         _translateTestResult = "测试中…";
         var tr = _plugin.Translator;
+        var proxy = ProxyInfo.Describe();
         Task.Run(async () =>
         {
             try
             {
-                _translateTestResult = "✓ " + await tr.TestAsync(CancellationToken.None).ConfigureAwait(false);
+                var zh = await tr.TestAsync(CancellationToken.None).ConfigureAwait(false);
+                _translateTestResult = $"✓ {zh}　（{tr.BackendName}；代理：{proxy}）";
             }
             catch (Exception e)
             {
-                _translateTestResult = "✗ " + e.Message;
+                _translateTestResult = $"✗ {e.Message}　（{tr.BackendName}；代理：{proxy}）";
             }
         });
     }
@@ -929,6 +932,18 @@ public class MainWindow : Window
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("插件跑在 .NET 里，**默认就走 Windows 系统代理** —— 系统代理开着的话这里留空即可。\n" +
                              "只有本机没系统代理、但你自己有本地代理客户端时，才需要手填（如 http://127.0.0.1:7890）。");
+
+        // 一眼看清「插件实际会走哪儿」：这是看 .NET 的解析结果，不是猜的
+        var detected = ProxyInfo.Describe();
+        ImGui.SameLine();
+        ImGui.TextColored(Dim, $"当前实际走：{detected}");
+
+        if (cfg.TranslateProxy.Trim().Length == 0 && !ProxyInfo.HasProxy && backendIdx == 0)
+        {
+            ImGui.TextColored(Yellow, "⚠ 没检测到代理，谷歌在国内通常连不上 —— " +
+                                      "请把翻墙软件的「系统代理」打开，或在这里手填它的本地地址；" +
+                                      "也可以先换「有道」后端（国内直连可用）。");
+        }
 
         if (backendIdx == 3)
         {

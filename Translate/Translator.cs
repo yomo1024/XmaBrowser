@@ -203,7 +203,8 @@ public sealed class Translator : IDisposable
 
             if (!resp.IsSuccessStatusCode)
                 throw new InvalidOperationException(
-                    $"谷歌翻译 HTTP {(int)resp.StatusCode}（连不上的话通常是没走代理：设置里填代理，或换国内后端）：{Shorten(body)}");
+                    $"谷歌翻译 HTTP {(int)resp.StatusCode}；当前实际走：{ProxyInfo.Describe()}　" +
+                    "（连不上的话通常是没走代理：把翻墙软件的「系统代理」打开，或在设置里手填它的本地地址；也可换国内后端）");
 
             var translated = ReadGoogleTranslation(body);
             if (translated.Length == 0)

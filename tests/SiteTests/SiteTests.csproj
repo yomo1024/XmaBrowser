@@ -36,6 +36,7 @@
     <Compile Include="..\..\Browser\BrowserChannel.cs" />
     <!-- 翻译器：纯 HTTP + JSON，不含 Dalamud 依赖，所以能在这里真连接口测 -->
     <Compile Include="..\..\Translate\Translator.cs" />
+    <Compile Include="..\..\Translate\ProxyInfo.cs" />
   </ItemGroup>
 
   <ItemGroup>
