@@ -34,6 +34,8 @@
     <Compile Include="..\..\Browser\IBrowserSettings.cs" />
     <Compile Include="..\..\Browser\CdpClient.cs" />
     <Compile Include="..\..\Browser\BrowserChannel.cs" />
+    <!-- 翻译器：纯 HTTP + JSON，不含 Dalamud 依赖，所以能在这里真连接口测 -->
+    <Compile Include="..\..\Translate\Translator.cs" />
   </ItemGroup>
 
   <ItemGroup>

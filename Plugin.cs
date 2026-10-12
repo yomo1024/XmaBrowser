@@ -11,6 +11,7 @@ using XmaBrowser.Install;
 using XmaBrowser.Browser;
 using XmaBrowser.Cover;
 using XmaBrowser.Ui;
+using XmaBrowser.Translate;
 using XmaBrowser.Windows;
 
 namespace XmaBrowser;
@@ -39,6 +40,7 @@ public sealed class Plugin : IDalamudPlugin
     public ThumbCache Thumbs { get; }
     public CoverFetcher Covers { get; }
     public PenumbraCoverDrawer CoverDrawer { get; }
+    public Translator Translator { get; }
     public HttpClient Http => _http;
 
     public readonly WindowSystem WindowSystem = new("XmaBrowser");
@@ -68,6 +70,8 @@ public sealed class Plugin : IDalamudPlugin
                                 Path.Combine(cacheDir, "temp"),
                                 msg => ChatGui.Print(msg));
         CoverDrawer = new PenumbraCoverDrawer(PluginInterface, Configuration, Penumbra, TextureProvider, Log);
+        Translator = new Translator(_http, Configuration, Path.Combine(PluginInterface.ConfigDirectory.FullName, "translate"),
+                                    msg => Log.Debug("[XmaBrowser] " + msg));
         CoverInjector.CleanupOld();     // 清掉上次注入留在 %TEMP% 的包
 
         _window = new MainWindow(this);
@@ -101,6 +105,7 @@ public sealed class Plugin : IDalamudPlugin
         Jobs.Dispose();
         Thumbs.Dispose();
         CoverDrawer.Dispose();
+        Translator.Dispose();
         Channel.Dispose();
         Penumbra.Dispose();
         _http.Dispose();

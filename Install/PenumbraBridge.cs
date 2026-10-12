@@ -39,6 +39,7 @@ public sealed class PenumbraBridge : IDisposable, Cover.CoverContext
     private readonly ReloadMod _reloadMod;
     private readonly TrySetMod _trySetMod;
     private readonly TrySetModPriority _trySetModPriority;
+    private readonly GetCurrentModSettings _getCurrentModSettings;
     private readonly RedrawAll _redrawAll;
     private readonly OpenMainWindow _openMainWindow;
 
@@ -66,6 +67,7 @@ public sealed class PenumbraBridge : IDisposable, Cover.CoverContext
         _reloadMod = new ReloadMod(pi);
         _trySetMod = new TrySetMod(pi);
         _trySetModPriority = new TrySetModPriority(pi);
+        _getCurrentModSettings = new GetCurrentModSettings(pi);
         _redrawAll = new RedrawAll(pi);
         _openMainWindow = new OpenMainWindow(pi);
 
@@ -160,6 +162,30 @@ public sealed class PenumbraBridge : IDisposable, Cover.CoverContext
             var cur = _getCollection.Invoke(ApiCollectionType.Yourself);
             return cur == null ? null : (cur.Value.Id, cur.Value.Name);
         }, null);
+
+    /// <summary>
+    /// 按类型取集合。<c>Yourself</c> = 管你自己角色的那个（真正影响游戏）；
+    /// <c>Current</c> = Penumbra 界面当前选中的那个（用它兜底，界面看着一致）。
+    /// </summary>
+    public (Guid Id, string Name)? Collection(ApiCollectionType type)
+        => OnFx<(Guid, string)?>("GetCollection", () =>
+        {
+            var cur = _getCollection.Invoke(type);
+            return cur == null ? null : (cur.Value.Id, cur.Value.Name);
+        }, null);
+
+    /// <summary>
+    /// 读回一条 Mod 在某个集合里**是否启用**（启完必须读回来核对，别只看 Set 的返回值）。
+    /// 返回的 Enabled 为 null 表示没读到（ec 里会有原因）。
+    /// </summary>
+    public (string Ec, bool? Enabled, int Priority) GetEnabled(Guid collectionId, string modDirectory, string modName)
+        => OnFx<(string, bool?, int)>("GetCurrentModSettings", () =>
+        {
+            var (ec, data) = _getCurrentModSettings.Invoke(collectionId: collectionId, modDirectory: modDirectory,
+                                                          modName: modName, ignoreInheritance: false);
+            if (data is not { } d) return (ec.ToString(), (bool?)null, 0);
+            return (ec.ToString(), d.Item1, d.Item2);
+        }, ("Exception", null, 0));
 
     // ---------------------------------------------------------------- 安装 / 路径
 

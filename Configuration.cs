@@ -2,11 +2,12 @@ using System;
 using Dalamud.Configuration;
 using XmaBrowser.Browser;
 using XmaBrowser.Site;
+using XmaBrowser.Translate;
 
 namespace XmaBrowser;
 
 [Serializable]
-public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSettings
+public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSettings, ITranslateSettings
 {
     public int Version { get; set; } = 1;
 
@@ -40,6 +41,38 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
 
     /// <summary>缩略图磁盘缓存上限（MB），超出按最久未用淘汰。</summary>
     public int ThumbCacheMb { get; set; } = 256;
+
+    /// <summary>浏览结果用宫格（卡片）展示；false = 列表。</summary>
+    public bool GridView { get; set; }
+
+    /// <summary>宫格卡片宽度（未缩放的像素宽；实际宽度会乘 UI 缩放）。</summary>
+    public int GridCardWidth { get; set; } = 172;
+
+    // ---------------- 翻译（英文 Mod 标题/描述 → 中文）----------------
+
+    /// <summary>
+    /// 翻译后端：
+    /// <c>youdao</c> = 有道公共接口（免 Key，**默认**；用 .NET 栈实测可用，但限流很紧：约 1 次/2 秒）；
+    /// <c>tencent</c> = 腾讯交互翻译（免 Key，质量与速度都更好，但**部分机器上证书链在 Windows 下验证不通过**，
+    ///             实测本机报 SSL 错误；报错就换后端）；
+    /// <c>openai</c> = 任意 OpenAI 兼容接口（DeepSeek 等，质量最好最快，需要填 Key）。
+    /// </summary>
+    public string TranslateBackend { get; set; } = "youdao";
+
+    /// <summary>OpenAI 兼容接口的 BaseUrl（默认 DeepSeek）。</summary>
+    public string TranslateBaseUrl { get; set; } = "https://api.deepseek.com/v1";
+
+    /// <summary>OpenAI 兼容接口的 API Key。</summary>
+    public string TranslateApiKey { get; set; } = string.Empty;
+
+    /// <summary>OpenAI 兼容接口的模型名。</summary>
+    public string TranslateModel { get; set; } = "deepseek-chat";
+
+    /// <summary>打开详情时自动翻译标题 + 描述。</summary>
+    public bool AutoTranslateDetail { get; set; } = true;
+
+    /// <summary>列表/宫格里附上中文标题（**只用已有缓存**，不会每行都发请求）。</summary>
+    public bool ShowTranslatedTitles { get; set; } = true;
 
     // ---------------- 装进文件夹（Penumbra 列表里就是折叠组）----------------
 

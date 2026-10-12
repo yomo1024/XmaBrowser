@@ -26,6 +26,8 @@ public class MainWindow : Window
     private static readonly Vector4 Green = new(0.45f, 0.85f, 0.45f, 1f);
     private static readonly Vector4 Yellow = new(0.95f, 0.80f, 0.45f, 1f);
     private static readonly Vector4 Blue = new(0.55f, 0.75f, 0.98f, 1f);
+    private static readonly Vector4 CardBg = new(0.16f, 0.16f, 0.18f, 1f);
+    private static readonly Vector4 SelBg = new(0.20f, 0.28f, 0.44f, 1f);
 
     private readonly Plugin _plugin;
     private readonly SearchForm _form = new();
@@ -34,7 +36,11 @@ public class MainWindow : Window
     // ---- 浏览状态 ----
     private List<SearchHit> _hits = [];
     private int _page = 1;
+    private int _jumpPage = 1;
     private int _totalMods;
+
+    /// <summary>站点一页固定 15 条（实测），用于算总页数。</summary>
+    private const int SitePageSize = 15;
     private string _status = "留空关键词直接搜 = 看最新发布";
     private string _error = string.Empty;
     private bool _busy;
@@ -43,6 +49,20 @@ public class MainWindow : Window
     private ModDetail? _detail;
     private bool _detailBusy;
     private int _previewIndex;
+
+    // ---- 翻译状态 ----
+    private bool _showOriginal;
+    private string _translatedTitle = string.Empty;
+    private string _translatedDesc = string.Empty;
+    private bool _translating;
+    private string _translateError = string.Empty;
+    private CancellationTokenSource? _transCts;
+    private CancellationTokenSource? _titleCts;
+    private int _titleBusy;      // >0 = 正在批量翻译本页标题
+    private int _titleDone;
+    private int _titleTotal;
+    private string _translateTestResult = string.Empty;
+    private string _translatedForKey = string.Empty;
 
     // ---- 弹窗 ----
     private bool _advancedOpen;
@@ -150,7 +170,8 @@ public class MainWindow : Window
         var listWidth = MathF.Max(380f, avail.X * 0.5f);
 
         ImGui.BeginChild("xma-browse-left", new Vector2(listWidth, 0));
-        DrawResultList();
+        if (_plugin.Configuration.GridView) DrawResultGrid();
+        else DrawResultList();
         ImGui.EndChild();
 
         ImGui.SameLine();
@@ -203,20 +224,162 @@ public class MainWindow : Window
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("勾上后，「关键词」框里的内容按站点标签精确检索。");
 
-        var right = ImGui.GetContentRegionAvail().X;
+        // 第三行：**页码单独一行** + 视图切换 + 批量翻译标题。
+        // （原来翻页按钮被 SetCursorPosX 推到过滤条件那一行的最右端，窗口一窄就跑到可视区外，
+        //   看起来就像「只有 15 条、没法翻页」。）
+        DrawPager("top");
+
         ImGui.SameLine();
-        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + MathF.Max(0f, right - 250f));
-        ImGui.BeginDisabled(_busy || _page <= 1);
-        if (ImGui.Button("◀ 上一页")) StartSearch(_page - 1);
-        ImGui.EndDisabled();
+        ImGui.TextColored(Dim, "｜视图");
+
+        var grid = _plugin.Configuration.GridView;
         ImGui.SameLine();
-        ImGui.TextColored(Dim, $"第 {_page} 页");
+        ImGui.BeginDisabled(_busy);
+        if (ImGui.RadioButton("列表", !grid))
+        {
+            _plugin.Configuration.GridView = false;
+            _plugin.Configuration.Save();
+        }
         ImGui.SameLine();
-        ImGui.BeginDisabled(_busy || _hits.Count == 0);
-        if (ImGui.Button("下一页 ▶")) StartSearch(_page + 1);
+        if (ImGui.RadioButton("宫格", grid))
+        {
+            _plugin.Configuration.GridView = true;
+            _plugin.Configuration.Save();
+        }
         ImGui.EndDisabled();
 
+        ImGui.SameLine();
+        ImGui.TextColored(Dim, "｜");
+        ImGui.SameLine();
+        DrawTitleTranslateButton();
+
         ImGui.Spacing();
+    }
+
+    /// <summary>
+    /// 页码控制条。单独一行，并在结果区底部再放一份（滚动到下面不用跑回顶部翻页）。
+    /// </summary>
+    private void DrawPager(string id)
+    {
+        var totalPages = _totalMods > 0 ? (_totalMods + SitePageSize - 1) / SitePageSize : 0;
+
+        ImGui.BeginDisabled(_busy || _page <= 1);
+        if (ImGui.Button($"◀ 上一页##{id}")) StartSearch(_page - 1);
+        ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        ImGui.TextColored(Dim, totalPages > 0
+            ? $"第 {_page} / {totalPages} 页　共 {_totalMods} 条（站点每页 {SitePageSize} 条）"
+            : $"第 {_page} 页");
+
+        ImGui.SameLine();
+        ImGui.BeginDisabled(_busy || _hits.Count == 0);
+        if (ImGui.Button($"下一页 ▶##{id}")) StartSearch(_page + 1);
+        ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        ImGui.TextColored(Dim, "跳到");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(64);
+        ImGui.InputInt($"##jump-{id}", ref _jumpPage);
+        ImGui.SameLine();
+        ImGui.BeginDisabled(_busy);
+        if (ImGui.Button($"跳转##{id}"))
+            StartSearch(Math.Max(1, totalPages > 0 ? Math.Min(_jumpPage, totalPages) : _jumpPage));
+        ImGui.EndDisabled();
+    }
+
+    /// <summary>「翻译本页标题」+ 进度（批量翻译只走这一条，不会每行都发请求）。</summary>
+    private void DrawTitleTranslateButton()
+    {
+        if (_titleBusy > 0)
+        {
+            ImGui.ProgressBar(_titleTotal > 0 ? _titleDone / (float)_titleTotal : 0f, new Vector2(150, 0),
+                              $"{_titleDone}/{_titleTotal}");
+            ImGui.SameLine();
+            if (ImGui.Button("停止##title-tr")) _titleCts?.Cancel();
+            return;
+        }
+
+        ImGui.BeginDisabled(_hits.Count == 0 || _busy);
+        if (ImGui.Button("翻译本页标题")) TranslatePageTitles();
+        ImGui.EndDisabled();
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("把本页的英文标题翻成中文并缓存，列表/宫格里会显示中文名。\n" +
+                             $"当前后端：{_plugin.Translator.BackendName}\n" +
+                             "详情描述：在右侧点「翻译标题+描述」，或开着自动翻译。");
+    }
+
+    /// <summary>设置页的「测试翻译」：翻一句固定的英文并回报结果/错误。</summary>
+    private void TestTranslation()
+    {
+        _translateTestResult = "测试中…";
+        var tr = _plugin.Translator;
+        Task.Run(async () =>
+        {
+            try
+            {
+                _translateTestResult = "✓ " + await tr.TestAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                _translateTestResult = "✗ " + e.Message;
+            }
+        });
+    }
+
+    private void TranslatePageTitles()
+    {
+        if (_titleBusy > 0) return;
+
+        _titleCts?.Cancel();
+        _titleCts = new CancellationTokenSource();
+        var ct = _titleCts.Token;
+
+        var titles = _hits.Select(h => h.Title)
+                          .Where(t => t.Length > 0)
+                          .Distinct(StringComparer.Ordinal)
+                          .ToList();
+
+        _titleTotal = titles.Count;
+        _titleDone = 0;
+        _titleBusy = 1;
+        _translateError = string.Empty;
+
+        var tr = _plugin.Translator;
+        Task.Run(async () =>
+        {
+            foreach (var t in titles)
+            {
+                if (ct.IsCancellationRequested) break;
+                if (tr.Cached(t) is not null)
+                {
+                    _titleDone++;
+                    continue;
+                }
+
+                try
+                {
+                    await tr.TranslateAsync(t, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception e)
+                {
+                    // 同一类错误别刷屏：报一条就停
+                    _translateError = e.Message;
+                    Plugin.Log.Warning($"[XmaBrowser] 批量翻译标题失败：{e.Message}");
+                    break;
+                }
+
+                _titleDone++;
+            }
+
+            _titleBusy = 0;
+        }, ct);
     }
 
     private void DrawResultList()
@@ -251,7 +414,9 @@ public class MainWindow : Window
                 else ImGui.Dummy(new Vector2(68, 42));
 
                 ImGui.TableNextColumn();
-                if (ImGui.Selectable(hit.Title, _selected?.ModId == hit.ModId, ImGuiSelectableFlags.SpanAllColumns))
+                var zhTitle = _plugin.Configuration.ShowTranslatedTitles ? _plugin.Translator.Cached(hit.Title) : null;
+                var rowLabel = zhTitle is { Length: > 0 } ? zhTitle : hit.Title;
+                if (ImGui.Selectable(rowLabel, _selected?.ModId == hit.ModId, ImGuiSelectableFlags.SpanAllColumns))
                 {
                     _selected = hit;
                     _previewIndex = 0;
@@ -278,7 +443,95 @@ public class MainWindow : Window
 
             ImGui.EndTable();
         }
+
+        ImGui.Spacing();
+        DrawPager("bottom");
     }
+
+    // ==================================================================== 宫格视图
+
+    private void DrawResultGrid()
+    {
+        if (_hits.Count == 0)
+        {
+            ImGui.TextColored(Dim, _busy ? "搜索中…" : "还没有结果。敲关键词回车，或直接点「搜索」看最新发布。");
+            return;
+        }
+
+        var cfg = _plugin.Configuration;
+        var cardW = MathF.Max(120f, cfg.GridCardWidth * ImGui.GetIO().FontGlobalScale);
+        var sp = ImGui.GetStyle().ItemSpacing.X;
+        var avail = ImGui.GetContentRegionAvail().X;
+        var cols = Math.Max(1, (int)((avail + sp) / (cardW + sp)));
+
+        if (ImGui.BeginTable("xma-grid", cols, ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingFixedFit))
+        {
+            for (var i = 0; i < _hits.Count; i++)
+            {
+                if (i % cols == 0) ImGui.TableNextRow();
+                ImGui.TableNextColumn();
+                DrawGridCard(_hits[i], cardW);
+            }
+            ImGui.EndTable();
+        }
+
+        ImGui.Spacing();
+        DrawPager("grid-bottom");
+    }
+
+    /// <summary>宫格里的一张卡：缩略图 + 标题（有中文就用中文）+ 类型/作者，整块可点。</summary>
+    private void DrawGridCard(SearchHit hit, float cardW)
+    {
+        var cfg = _plugin.Configuration;
+        var selected = _selected?.ModId == hit.ModId;
+        var imgW = cardW - 12f;
+        var imgH = imgW * 0.56f;
+        var cardH = imgH + 50f;
+
+        ImGui.PushID("grid-" + hit.ModId);
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, selected ? SelBg : CardBg);
+        ImGui.BeginChild("c", new Vector2(cardW, cardH), true);
+
+        var wrap = _plugin.Thumbs.Get(hit.ThumbUrl)?.GetWrapOrDefault();
+        if (wrap is not null) ImGui.Image(wrap.Handle, Fit(wrap.Size, imgW, imgH));
+        else ImGui.Dummy(new Vector2(imgW, imgH));
+
+        var zh = cfg.ShowTranslatedTitles ? _plugin.Translator.Cached(hit.Title) : null;
+        var title = zh is { Length: > 0 } ? zh : hit.Title;
+        ImGui.TextUnformatted(Clip(title, 32));
+        ImGui.TextColored(Dim, Clip($"{hit.Type} · {hit.Author}", 26));
+        if (hit.IsNew)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(Green, "NEW");
+        }
+        else if (hit.IsUpdated)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(Yellow, "UPD");
+        }
+
+        // 悬停/点击必须在子窗口内部判定（EndChild 之后 IsWindowHovered 指的是父窗口）
+        var hovered = ImGui.IsWindowHovered();
+        var clicked = hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left);
+
+        ImGui.EndChild();
+        ImGui.PopStyleColor();
+        ImGui.PopID();
+
+        if (clicked)
+        {
+            _selected = hit;
+            _previewIndex = 0;
+            LoadDetail(hit);
+        }
+
+        if (hovered)
+            ImGui.SetTooltip($"{hit.Title}\n{hit.Author} · {hit.Type} · 浏览 {hit.Views}\n单击查看详情，右下角「安装到 Penumbra」安装");
+    }
+
+    /// <summary>按字符数截断（中英混排够用，不追求像素精确）。</summary>
+    private static string Clip(string s, int max) => s.Length <= max ? s : s[..max] + "…";
 
     private void DrawDetailPane()
     {
@@ -302,9 +555,23 @@ public class MainWindow : Window
             return;
         }
 
-        ImGui.TextWrapped(d.Title.Length > 0 ? d.Title : hit.Title);
+        // 自动翻译（按 ModId 只触发一次，失败不重试，避免每帧重发请求）
+        if (_plugin.Configuration.AutoTranslateDetail && !_translating &&
+            !string.Equals(_translatedForKey, d.ModId, StringComparison.Ordinal))
+        {
+            _translatedForKey = d.ModId;
+            StartTranslateDetail(d);
+        }
+
+        var zhTitle = _translatedTitle.Length > 0 ? _translatedTitle : _plugin.Translator.Cached(d.Title);
+        var showTitle = !_showOriginal && zhTitle is { Length: > 0 } ? zhTitle : (d.Title.Length > 0 ? d.Title : hit.Title);
+        ImGui.TextWrapped(showTitle);
+        if (!_showOriginal && zhTitle is { Length: > 0 } && !string.Equals(zhTitle, d.Title, StringComparison.Ordinal))
+            ImGui.TextColored(Dim, "原文：" + d.Title);
+
         ImGui.TextColored(Dim, $"作者 {d.Author}　类型 {d.Type}　站点 id {d.ModId}");
         ImGui.TextColored(Dim, $"最后更新 {Fmt(d.LastUpdateLocal)}　发布 {Fmt(d.ReleaseLocal)}");
+        DrawTranslateControls(d);
         if (_detailViaChannel)
         {
             ImGui.SameLine();
@@ -343,6 +610,13 @@ public class MainWindow : Window
         ImGui.Spacing();
         ImGui.TextColored(Dim, "描述");
         ImGui.BeginChild("xma-desc", new Vector2(0, 130), true);
+        var zhDesc = _translatedDesc.Length > 0 ? _translatedDesc : _plugin.Translator.Cached(d.Description);
+        if (!_showOriginal && zhDesc is { Length: > 0 } && !string.Equals(zhDesc, d.Description, StringComparison.Ordinal))
+        {
+            ImGui.TextColored(Blue, zhDesc);
+            ImGui.Spacing();
+            ImGui.TextColored(Dim, "—— 以下为原文 ——");
+        }
         ImGui.TextWrapped(d.Description.Length > 0 ? d.Description : "（站点上没有描述）");
         ImGui.EndChild();
 
@@ -373,6 +647,78 @@ public class MainWindow : Window
         }
         ImGui.SameLine();
         if (ImGui.Button("复制下载链接")) ImGui.SetClipboardText(d.AbsoluteDownloadUrl);
+    }
+
+    // ==================================================================== 翻译
+
+    /// <summary>详情里的翻译按钮 + 状态 + 原文切换。</summary>
+    private void DrawTranslateControls(ModDetail d)
+    {
+        ImGui.BeginDisabled(_translating);
+        if (ImGui.Button(_translating ? "翻译中…" : "翻译标题+描述"))
+        {
+            _translatedForKey = d.ModId;
+            StartTranslateDetail(d);
+        }
+        ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (ImGui.Button(_showOriginal ? "显示译文" : "显示原文"))
+            _showOriginal = !_showOriginal;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip($"当前后端：{_plugin.Translator.BackendName}（设置 → 翻译 可切换）");
+
+        if (_translateError.Length > 0)
+        {
+            ImGui.SameLine();
+            ImGui.TextWrapped(_translateError);
+        }
+        else if (!_plugin.Translator.IsConfigured)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(Yellow, "翻译后端未配置（设置 → 翻译）");
+        }
+    }
+
+    /// <summary>翻译当前详情的标题 + 描述（后台跑，结果进缓存）。</summary>
+    private void StartTranslateDetail(ModDetail d)
+    {
+        if (_translating) return;
+
+        _transCts?.Cancel();
+        _transCts = new CancellationTokenSource();
+        var ct = _transCts.Token;
+
+        _translating = true;
+        _translateError = string.Empty;
+        _translatedTitle = string.Empty;
+        _translatedDesc = string.Empty;
+
+        var tr = _plugin.Translator;
+        var title = d.Title.Length > 0 ? d.Title : (_selected?.Title ?? string.Empty);
+        var desc = d.Description;
+
+        Task.Run(async () =>
+        {
+            try
+            {
+                if (title.Length > 0) _translatedTitle = await tr.TranslateAsync(title, ct).ConfigureAwait(false);
+                if (desc.Length > 0) _translatedDesc = await tr.TranslateAsync(desc, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // 切走了就算了
+            }
+            catch (Exception e)
+            {
+                _translateError = e.Message;
+                Plugin.Log.Warning($"[XmaBrowser] 详情翻译失败：{e.Message}");
+            }
+            finally
+            {
+                _translating = false;
+            }
+        }, ct);
     }
 
     // ==================================================================== 队列
@@ -524,6 +870,105 @@ public class MainWindow : Window
         ImGui.TextColored(Dim, "缓存目录：" + _plugin.Site.CacheDirectory);
         ImGui.SameLine();
         if (ImGui.Button("打开##cache")) OpenExternal(_plugin.Site.CacheDirectory);
+
+        ImGui.Spacing();
+        ImGui.TextColored(Blue, "浏览视图");
+        ImGui.Separator();
+        var gw = cfg.GridCardWidth;
+        ImGui.SetNextItemWidth(200);
+        if (ImGui.SliderInt("宫格卡片宽度", ref gw, 110, 260))
+        {
+            cfg.GridCardWidth = gw;
+            changed = true;
+        }
+        ImGui.SameLine();
+        ImGui.TextColored(Dim, "（浏览页右上可切「列表 / 宫格」）");
+
+        ImGui.Spacing();
+        ImGui.TextColored(Blue, "翻译（英文 Mod 标题/描述 → 中文）");
+        ImGui.Separator();
+
+        var backends = new[] { "有道公共接口（免 Key，默认）", "腾讯交互翻译（免 Key，更优但可能证书不通）", "OpenAI 兼容（DeepSeek 等，需 Key）" };
+        var currentBackend = (_plugin.Configuration.TranslateBackend ?? "youdao").Trim().ToLowerInvariant();
+        var backendIdx = currentBackend switch
+        {
+            "tencent" => 1,
+            "openai" => 2,
+            _ => 0,
+        };
+        ImGui.SetNextItemWidth(340);
+        if (ImGui.Combo("后端##tr-backend", ref backendIdx, backends, backends.Length))
+        {
+            cfg.TranslateBackend = backendIdx switch
+            {
+                1 => "tencent",
+                2 => "openai",
+                _ => "youdao",
+            };
+            changed = true;
+        }
+
+        if (backendIdx == 2)
+        {
+            ImGui.TextUnformatted("BaseUrl");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(340);
+            var baseUrl = cfg.TranslateBaseUrl;
+            if (ImGui.InputTextWithHint("##tr-base", "https://api.deepseek.com/v1", ref baseUrl, 200))
+            {
+                cfg.TranslateBaseUrl = baseUrl;
+                changed = true;
+            }
+
+            ImGui.TextUnformatted("模型　");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(200);
+            var model = cfg.TranslateModel;
+            if (ImGui.InputText("##tr-model", ref model, 80))
+            {
+                cfg.TranslateModel = model;
+                changed = true;
+            }
+
+            ImGui.TextUnformatted("API Key");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(340);
+            var key = cfg.TranslateApiKey;
+            if (ImGui.InputText("##tr-key", ref key, 300, ImGuiInputTextFlags.Password))
+            {
+                cfg.TranslateApiKey = key;
+                changed = true;
+            }
+            ImGui.SameLine();
+            ImGui.TextColored(Dim, "只存在本地插件配置里");
+        }
+        else
+        {
+            ImGui.TextColored(Dim, "无需配置：直接用公共接口（长文本会自动按句分段），译文缓存在插件目录。");
+        }
+
+        var autoTr = cfg.AutoTranslateDetail;
+        if (ImGui.Checkbox("打开详情时自动翻译标题+描述", ref autoTr))
+        {
+            cfg.AutoTranslateDetail = autoTr;
+            changed = true;
+        }
+        ImGui.SameLine();
+        var showTr = cfg.ShowTranslatedTitles;
+        if (ImGui.Checkbox("列表/宫格显示中文标题（只用缓存）", ref showTr))
+        {
+            cfg.ShowTranslatedTitles = showTr;
+            changed = true;
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("测试翻译")) TestTranslation();
+        if (_translateTestResult.Length > 0)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(_translateTestResult.StartsWith("✓", StringComparison.Ordinal) ? Green : Red,
+                              _translateTestResult);
+        }
 
         ImGui.Spacing();
         ImGui.TextColored(Blue, "装进文件夹（Penumbra 的列表里就是可折叠的组）");
@@ -913,6 +1358,7 @@ public class MainWindow : Window
         if (_busy || page < 1) return;
 
         _page = page;
+        _jumpPage = page;
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
@@ -988,6 +1434,13 @@ public class MainWindow : Window
         _detail = null;
         _detailViaChannel = false;
         _error = string.Empty;
+
+        // 换了一条 Mod：把上一条的翻译清掉（正在跑的那个也取消）
+        _transCts?.Cancel();
+        _translating = false;
+        _translatedTitle = string.Empty;
+        _translatedDesc = string.Empty;
+        _translateError = string.Empty;
 
         var client = _plugin.Site;
         var channel = _plugin.Channel;

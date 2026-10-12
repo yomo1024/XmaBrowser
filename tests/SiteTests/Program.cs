@@ -8,11 +8,13 @@ using XmaBrowser.Browser;
 using XmaBrowser.Cover;
 using XmaBrowser.Install;
 using XmaBrowser.Site;
+using XmaBrowser.Translate;
 
 // 站点层 / 包解析层 / 浏览器通道的无游戏自测。
 //   离线：dotnet run -c Release                  （用 samples/ 里的真实 HTML，不联网）
 //   联网：dotnet run -c Release -- live          （真站点：SFW 直连 + NSFW 浏览器通道 + 真实下载）
 var live = args.Contains("live");
+var translateOnly = args.Contains("translate");
 var pass = 0;
 var fail = 0;
 
@@ -376,6 +378,29 @@ Check("读回校验：只是同名前缀（XMA2）→ 不通过",
       !GroupPath.PathUnderFolder("XMA2/Gear/MyMod", "XMA"));
 Check("读回校验：路径为空 → 不通过", !GroupPath.PathUnderFolder("", "XMA"));
 
+Console.WriteLine();
+Console.WriteLine("=== 13. 翻译：分段逻辑（离线）===");
+{
+    var para = string.Join("\n", Enumerable.Range(0, 40).Select(i => $"This is sentence number {i} of the description."));
+    var chunks = Translator.Split(para, 200).ToList();
+    Console.WriteLine($"   40 行文本切成 {chunks.Count} 块，最长 {chunks.Max(c => c.Length)} 字符");
+    Check("分段：每块都不超过上限", chunks.All(c => c.Length <= 200));
+    Check("分段：确实切了多块", chunks.Count > 1, chunks.Count.ToString());
+    Check("分段：内容不丢（忽略空白后比对）", Normalize(string.Concat(chunks)) == Normalize(para));
+
+    var oneLine = new string('a', 500) + " word " + new string('b', 500);
+    var chunky = Translator.Split(oneLine, 200).ToList();
+    Console.WriteLine($"   1000 字符单行切成 {chunky.Count} 块，最长 {chunky.Max(c => c.Length)} 字符");
+    Check("分段：超长单行也能切且不超限", chunky.All(c => c.Length <= 200) && chunky.Count >= 5, chunky.Count.ToString());
+
+    Check("分段：空文本不产生块", !Translator.Split("", 200).Any());
+
+    using var trHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+    using var emptyTranslator = new Translator(trHttp, new TestTranslateSettings(), Path.GetTempPath());
+    Check("未翻译过的文本读缓存 = null", emptyTranslator.Cached("some text never translated") is null);
+    Check("标题显示回退到原文", emptyTranslator.DisplayTitle("My Mod") == "My Mod");
+}
+
 if (live)
 {
     var cacheDir = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "live");    Directory.CreateDirectory(cacheDir);
@@ -434,6 +459,48 @@ if (live)
     }
 }
 
+if (live || translateOnly)
+{
+    var trSettings = new TestTranslateSettings();
+    // 按后端名分目录：换后端时不会读到上一个后端留下的缓存（也就不用删任何东西）
+    var trCache = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "translate-" + trSettings.TranslateBackend);
+    Directory.CreateDirectory(trCache);
+
+    Console.WriteLine();
+    Console.WriteLine("=== 13. 联网实测：翻译后端真实调用 ===");
+    using (var trHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(40) })
+    using (var translator = new Translator(trHttp, trSettings, trCache))
+    {
+        Console.WriteLine($"   后端：{translator.BackendName}");
+        const string probeText = "Mimic Chest Replacement - a cute treasure chest retexture for glamour lovers";
+        try
+        {
+            var zh = await translator.TranslateAsync(probeText, CancellationToken.None);
+            Console.WriteLine($"   标题译文 → {zh}");
+            Check("联网翻译有中文结果", zh.Any(c => c >= 0x4E00 && c <= 0x9FFF), zh);
+            Check("第二次读缓存不再发请求", translator.Cached(probeText) is not null);
+        }
+        catch (Exception e)
+        {
+            Check("联网翻译成功（错误：" + e.Message + "）", false);
+        }
+
+        // 长文（多段）走的是「分段 + 限流间隔」这条路：公共接口限流很紧时可能失败，
+        // 所以这里只当**参考信息**打印，不让它把整条套件弄红。
+        try
+        {
+            var longText = string.Join(" ", Enumerable.Range(0, 20)
+                .Select(i => $"Sentence {i} explains this mod replaces a texture and needs Penumbra."));
+            var zhLong = await translator.TranslateAsync(longText, CancellationToken.None);
+            Console.WriteLine($"   [参考] 长文（{longText.Length} 字符）译文前 90 字 → {zhLong[..Math.Min(90, zhLong.Length)]}");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"   [参考] 长文翻译未成功（公共接口限流）：{e.Message}");
+        }
+    }
+}
+
 Console.WriteLine();
 Console.WriteLine($"==== 结果：通过 {pass}，失败 {fail} ====");
 return fail == 0 ? 0 : 1;
@@ -443,6 +510,17 @@ static void WriteEntry(ZipArchive z, string name, string content)
     var entry = z.CreateEntry(name);
     using var w = new StreamWriter(entry.Open());
     w.Write(content);
+}
+
+/// <summary>忽略空白后再比较（分段会在边界处丢掉空格/换行，这是正常的）。</summary>
+static string Normalize(string s) => new(s.Where(c => !char.IsWhiteSpace(c)).ToArray());
+
+internal sealed class TestTranslateSettings : ITranslateSettings
+{
+    public string TranslateBackend => "youdao";
+    public string TranslateBaseUrl => "https://api.deepseek.com/v1";
+    public string TranslateApiKey => string.Empty;
+    public string TranslateModel => "deepseek-chat";
 }
 
 internal sealed class TestSettings : IXmaSettings, IBrowserSettings

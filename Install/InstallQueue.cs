@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Penumbra.Api.Enums;
 using XmaBrowser.Browser;
 using XmaBrowser.Cover;
 using XmaBrowser.Site;
@@ -418,18 +419,24 @@ public sealed class InstallQueue : IDisposable
             job.Message = "在当前集合里启用…";
             Changed?.Invoke();
 
-            var collection = _penumbra.YourCollection();
-            if (collection is null)
+            var mods = _penumbra.Mods();
+            var okCount = 0;
+            var total = 0;
+
+            foreach (var dir in newDirs.Concat(addedNames).Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                job.Message = "装好了，但拿不到当前集合，没自动启用（去 Penumbra 里勾一下）";
+                total++;
+                var name = mods.TryGetValue(dir, out var n) ? n : dir;
+                var (ok, line) = TryEnable(dir, name);
+                if (ok) okCount++;
+                LogDiag("启用自检：" + line);
             }
-            else
-            {
-                var mods = _penumbra.Mods();
-                foreach (var dir in newDirs)
-                    _penumbra.SetEnabled(collection.Value.Id, dir, true, mods.TryGetValue(dir, out var n) ? n : dir);
-                job.Message = $"已装好并在「{collection.Value.Name}」里启用";
-            }
+
+            job.Message = okCount > 0 && okCount == total
+                ? $"已装好并在集合里启用（{okCount} 项，已读回确认）"
+                : okCount > 0
+                    ? $"装好 {total} 项，其中 {okCount} 项确认启用（其余见「关于」页诊断日志）"
+                    : "装好了，但自动启用没成功（原因见「关于」页诊断日志）";
         }
         else if (newDirs.Count > 0)
         {
@@ -491,12 +498,42 @@ public sealed class InstallQueue : IDisposable
                                                      : Math.Max(1, n / 1024) + "KB";
 
     /// <summary>
-    /// 把刚装好的 Mod 移进文件夹（Penumbra 列表里就是折叠组）。
+    /// 在集合里启用一条 Mod，并**读回**确认是否真的启用了 —— 只看 Set 的返回值会骗人
+    /// （TrySetMod 会回 NothingChanged / ModMissing / CollectionMissing，以前没检查就报成功）。
     ///
-    /// 用 SetModPath（内部是 Penumbra 的 RenameAndMove）；目标文件夹先落盘，
-    /// 因为 RenameAndMove 未必会自己创建中间目录（Penumbra 自己的「默认导入文件夹」
-    /// 也是先 FindOrCreateAllFolders 再挪）。
+    /// 依次试两个集合：<c>Yourself</c>（管你自己角色，真正影响游戏）→ <c>Current</c>（Penumbra 界面当前选中的那个）。
+    /// 返回 (是否确认启用, 给人看的说明)。
     /// </summary>
+    private (bool Ok, string Line) TryEnable(string dir, string name)
+    {
+        var notes = new List<string>();
+        var seen = new List<Guid>();
+
+        foreach (var type in new[] { ApiCollectionType.Yourself, ApiCollectionType.Current })
+        {
+            var col = _penumbra.Collection(type);
+            if (col is null)
+            {
+                notes.Add($"{type}：拿不到集合");
+                continue;
+            }
+
+            if (seen.Contains(col.Value.Id)) continue;   // 两个类型指向同一个集合时别重复试
+            seen.Add(col.Value.Id);
+
+            var ec = _penumbra.SetEnabled(col.Value.Id, dir, true, name);
+            var (recEc, enabled, priority) = _penumbra.GetEnabled(col.Value.Id, dir, name);
+            var state = enabled == true ? "已启用" : enabled == false ? "未启用" : "读不到";
+
+            notes.Add($"{type}「{col.Value.Name}」Set={ec} 读回={recEc}/{state}(优先级 {priority})");
+
+            if (enabled == true)
+                return (true, $"✓ {type}「{col.Value.Name}」：{state}（SetMod={ec}）");
+        }
+
+        return (false, $"✗ {dir}：" + string.Join("；", notes));
+    }
+
     private void GroupInstalled(InstallJob job, string folder, List<string> dirs)
     {
         var ok = 0;
