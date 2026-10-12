@@ -78,6 +78,15 @@ public sealed class InstallQueue : IDisposable
     /// <summary>播报关键结果（插件里接到游戏聊天框）。</summary>
     private readonly Action<string>? _notify;
 
+    /// <summary>
+    /// 本机 Penumbra 的 `SetModPath` 是否「假成功」（返回 Success 但路径不变）。
+    ///
+    /// 实机证据（2026-10-12，8 种写法全试）：连最简单的「只改名」都是
+    /// `SetModPath(...) → Success` 而读回路径/自定义名标志完全不变 → 该实现是空壳。
+    /// 识别到之后**不再做无效重试**，只给用户明确指引。
+    /// </summary>
+    public bool SetModPathNoOp { get; private set; }
+
     public IReadOnlyList<string> DiagLog
     {
         get { lock (_diagLog) return _diagLog.ToArray(); }
@@ -90,6 +99,19 @@ public sealed class InstallQueue : IDisposable
             _diagLog.Add($"{DateTime.Now:HH:mm:ss}  {line}");
             if (_diagLog.Count > MaxDiagLog) _diagLog.RemoveAt(0);
         }
+    }
+
+    /// <summary>识别到「SetModPath 假成功」后调用一次：停用自动归组并给出指引。</summary>
+    private void FlagSetModPathNoOp(string why)
+    {
+        if (SetModPathNoOp) return;
+        SetModPathNoOp = true;
+
+        _log.Warn($"[XmaBrowser] 检测到本机 Penumbra 的 SetModPath 不生效（返回 Success 但路径不变）：{why}");
+        LogDiag("⚠ 检测到 SetModPath 假成功（返回 Success 但路径不变）→ 已停用自动归组");
+        _notify?.Invoke("[XMA Browser] 检测到你这版 Penumbra 的 SetModPath 不生效（返回成功但不动路径），" +
+                        "已停用自动归组。想分组可用 Penumbra 自带的「默认导入文件夹」：" +
+                        "在 Penumbra 的 mod 列表里右键任意文件夹 → Set Folder as... → Set Default Import Folder。");
     }
 
     public event Action? Changed;
@@ -412,7 +434,12 @@ public sealed class InstallQueue : IDisposable
         }
 
         // ---------- 4.5) 归入文件夹（Penumbra 的列表里就是可折叠的组）----------
-        if (_cfg.GroupIntoFolders)
+        if (_cfg.GroupIntoFolders && SetModPathNoOp)
+        {
+            job.Message += "（本机 Penumbra 的 SetModPath 不生效，已跳过归组）";
+            LogDiag("跳过归组：SetModPath 已判定为假成功");
+        }
+        else if (_cfg.GroupIntoFolders)
         {
             var folder = GroupPath.BuildFolder(_cfg.GroupTemplate, _cfg.GroupPrefix, job.SiteType,
                                                job.Author, job.ModId, job.Title);
@@ -535,6 +562,7 @@ public sealed class InstallQueue : IDisposable
         sb.AppendLine($"候选路径：{string.Join(" | ", candidates)}");
 
         var last = "没有可尝试的路径形态";
+        var succeededCalls = 0;
         foreach (var candidate in candidates)
         {
             var result = _penumbra.SetPath(curDir, curName, candidate);
@@ -545,6 +573,7 @@ public sealed class InstallQueue : IDisposable
                 continue;
             }
 
+            succeededCalls++;
             // 读回验证（移动后节点名可能变了 → 按显示名重新定位）
             var (dir2, name2) = ResolveMod(curName, displayName);
             var after = _penumbra.GetPath(dir2, name2);
@@ -563,6 +592,11 @@ public sealed class InstallQueue : IDisposable
 
         sb.AppendLine($"列表快照（后）：{_penumbra.SnapshotList()}");
         sb.AppendLine("结果：失败 — " + last);
+
+        // 所有候选都回 Success 却毫无变化 → 判定为「SetModPath 假成功」（实机 8 种写法验证过）
+        if (succeededCalls > 0 && succeededCalls == candidates.Count)
+            FlagSetModPathNoOp("所有候选写法都回 Success 但路径不变");
+
         return (false, last, sb.ToString());
     }
 
@@ -700,6 +734,11 @@ public sealed class InstallQueue : IDisposable
 
             var ec = _penumbra.SetPath(d2, n2, path);
             var after = _penumbra.GetPath(d2, n2);
+
+            // 变体①「只改名」如果能返回 Success 却连名字都不变 → 说明这个 SetModPath 是空壳
+            if (label.StartsWith("①") && ec == "Success" &&
+                string.Equals(after.Path, start.Path, StringComparison.OrdinalIgnoreCase) && !after.CustomName)
+                FlagSetModPathNoOp("连最简单的改名都没有生效");
 
             // 名称变了要跟着更新定位用的名字
             if (!string.Equals(after.Path, path, StringComparison.OrdinalIgnoreCase))

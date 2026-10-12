@@ -685,6 +685,14 @@ public class MainWindow : Window
         ImGui.Spacing();
         ImGui.TextColored(Blue, "诊断：Mod 路径与分组");
         ImGui.Separator();
+
+        if (_plugin.Jobs.SetModPathNoOp)
+        {
+            ImGui.TextColored(Red, "⚠ 本机 Penumbra 的 SetModPath 不生效（返回 Success 但路径不变）—— 自动归组已停用。");
+            ImGui.TextWrapped("可用替代：在 Penumbra 的 mod 列表里右键任意文件夹 → Set Folder as... → " +
+                              "Set Default Import Folder，之后新装的 Mod 会被 Penumbra 自己放进那个文件夹；" +
+                              "或右键某条 Mod → Move Mod，手动把它的路径写成 XMA/Gear/名字。");
+        }
         if (ImGui.Button("读取所有 Mod 的真实路径（并写日志）"))
         {
             _diagMods = _plugin.Penumbra.Mods().ToList();
