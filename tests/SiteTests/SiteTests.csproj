@@ -22,6 +22,7 @@
     <Compile Include="..\..\Site\IXmaLog.cs" />
     <Compile Include="..\..\Site\IXmaSettings.cs" />
     <Compile Include="..\..\Site\XmaModels.cs" />
+    <Compile Include="..\..\Site\XmaBlock.cs" />
     <Compile Include="..\..\Site\XmaParser.cs" />
     <Compile Include="..\..\Site\XmaClient.cs" />
     <Compile Include="..\..\Install\PackageResolver.cs" />

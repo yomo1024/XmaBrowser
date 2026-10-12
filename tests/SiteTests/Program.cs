@@ -44,6 +44,31 @@ Check("登录态本地格式可解析", t2 is not null && t2.Value.Month == 9 &&
 Check("空串返回 null", XmaTime.Parse("") is null);
 
 Console.WriteLine();
+Console.WriteLine("=== 2b. 直连被拒：原因判定（人机校验 vs 需要登录态）===");
+Check("正常响应 → None",
+      XmaBlockClassifier.Classify(200, null, false) == XmaBlockReason.None);
+Check("cf-mitigated: challenge 头 → 人机校验（最可靠的判据）",
+      XmaBlockClassifier.Classify(403, "", true) == XmaBlockReason.CloudflareChallenge);
+Check("挑战页正文 Just a moment → 人机校验",
+      XmaBlockClassifier.Classify(403, "<html><title>Just a moment...</title>", false) == XmaBlockReason.CloudflareChallenge);
+Check("challenge-platform 正文 → 人机校验",
+      XmaBlockClassifier.Classify(403, "<script src=/cdn-cgi/challenge-platform/h/b/orchestrate></script>", false)
+          == XmaBlockReason.CloudflareChallenge);
+Check("裸 403（站点自己的 403 页）→ 需要登录态",
+      XmaBlockClassifier.Classify(403, "<title>403 Error | XIV Mod Archive</title>", false) == XmaBlockReason.NeedsLogin);
+Check("404 → 下载直链需要浏览器",
+      XmaBlockClassifier.Classify(404, "", false) == XmaBlockReason.DownloadNeedsBrowser);
+Check("500 → 其它",
+      XmaBlockClassifier.Classify(500, "boom", false) == XmaBlockReason.Other);
+Check("说明文案把两种原因分开说",
+      XmaBlockClassifier.Describe(XmaBlockReason.CloudflareChallenge).Contains("人机校验") &&
+      XmaBlockClassifier.Describe(XmaBlockReason.CloudflareChallenge).Contains("NSFW") &&
+      XmaBlockClassifier.Describe(XmaBlockReason.NeedsLogin).Contains("登录态"));
+Check("短标签可直接显示",
+      XmaBlockClassifier.ShortLabel(XmaBlockReason.CloudflareChallenge) == "站点人机校验" &&
+      XmaBlockClassifier.ShortLabel(XmaBlockReason.NeedsLogin) == "需要登录态");
+
+Console.WriteLine();
 Console.WriteLine("=== 3. 搜索列表（page1 样本）===");
 var p1 = XmaParser.ParseSearch(Sample("search_page1.html"), 1);
 Console.WriteLine($"   解析到 {p1.Hits.Count} 条，站点提示总数 {p1.TotalMods}");

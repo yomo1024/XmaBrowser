@@ -43,6 +43,8 @@ public sealed class InstallJob
     public string Error { get; set; } = string.Empty;
     /// <summary>真实下载用的是浏览器通道（NSFW 才会走到）。</summary>
     public bool UsedBrowserChannel { get; set; }
+    /// <summary>走浏览器通道的原因（站点人机校验 / 需要登录态 / 直链需浏览器）。</summary>
+    public string BrowserReason { get; set; } = string.Empty;
     public DateTime StartedUtc { get; } = DateTime.UtcNow;
 
     public bool Finished => State is JobState.Done or JobState.Error or JobState.Cancelled;
@@ -197,15 +199,21 @@ public sealed class InstallQueue : IDisposable
         }
         catch (XmaAccessException e)
         {
+            if (!_cfg.AutoFallbackToBrowser)
+                throw new InvalidOperationException(
+                    e.Message + "（设置里关掉了「直连被拒时自动走浏览器通道」，所以没有降级）");
+
             if (!_channel.Enabled)
                 throw new InvalidOperationException(e.Message + "（可在设置里开启浏览器通道）");
 
             job.UsedBrowserChannel = true;
-            job.Message = "走浏览器通道下载（需要登录态的内容）…";
+            job.BrowserReason = XmaBlockClassifier.ShortLabel(e.Reason);
+            job.Message = $"走浏览器通道下载（{job.BrowserReason}）…";
+            _log.Info($"直连被拒 → 改用浏览器通道 [{job.BrowserReason}]：{e.Message}");
             Changed?.Invoke();
             var ok = await _channel.DownloadAsync(job.Url, dest, Progress, ct).ConfigureAwait(false);
             if (!ok)
-                throw new InvalidOperationException("浏览器通道也拿不到这个文件：" + _channel.LastError);
+                throw new InvalidOperationException($"浏览器通道也拿不到这个文件（{job.BrowserReason}）：{_channel.LastError}");
         }
 
         if (!File.Exists(dest) || new FileInfo(dest).Length == 0)

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Threading;
@@ -7,14 +8,7 @@ using System.Threading.Tasks;
 
 namespace XmaBrowser.Site;
 
-/// <summary>站点拒绝访问（403，或 /private/ 直链 404）：需要浏览器通道。</summary>
-public sealed class XmaAccessException(string message) : Exception(message);
-
-public sealed class XmaHttpException(int status, string url, string message) : Exception(message)
-{
-    public int Status { get; } = status;
-    public string Url { get; } = url;
-}
+// 说明：XmaAccessException（带原因）与判定逻辑在 XmaBlock.cs —— 那里是唯一的一份声明。
 
 public sealed class DownloadResult
 {
@@ -74,7 +68,13 @@ public sealed class XmaClient : IDisposable
         using var request = BuildRequest(url);
         using var response = await SendThrottledAsync(request, HttpCompletionOption.ResponseHeadersRead, ct)
             .ConfigureAwait(false);
-        ThrowIfBad(response, url);
+
+        // 失败时把错误体读出来再判定原因：只靠状态码会把「人机校验」误报成「需要登录态」
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await ReadErrorBodyAsync(response, ct).ConfigureAwait(false);
+            ThrowIfBad(response, url, body);
+        }
 
         var total = response.Content.Headers.ContentLength ?? 0;
         Directory.CreateDirectory(Path.GetDirectoryName(destFile)!);
@@ -157,27 +157,31 @@ public sealed class XmaClient : IDisposable
         }
     }
 
+    /// <summary>把失败响应的小体积错误体读出来（用于区分「人机校验」与「需要登录态」）。</summary>
+    private static async Task<string> ReadErrorBodyAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            var bytes = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+            var take = Math.Min(bytes.Length, 16 * 1024);
+            return System.Text.Encoding.UTF8.GetString(bytes, 0, take);
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
     private static void ThrowIfBad(HttpResponseMessage response, string url, string? body = null)
     {
         var code = (int)response.StatusCode;
         if (code is >= 200 and < 300) return;
 
-        if (code == 403)
-        {
-            // Cloudflare 人机校验页（本机实测：请求打得太密时整站会这样返回，连公开内容也一样）
-            if (body is not null && body.Contains("Just a moment", StringComparison.OrdinalIgnoreCase))
-                throw new XmaAccessException(
-                    "站点正在做 Cloudflare 人机校验（Just a moment）—— 稍等一会儿再试，或启用浏览器通道交给浏览器取。");
+        var cfMitigated = response.Headers.TryGetValues("cf-mitigated", out var values) &&
+                          values.Any(v => v.Contains("challenge", StringComparison.OrdinalIgnoreCase));
 
-            throw new XmaAccessException(
-                "站点返回 403：这条内容需要站点登录态（通常是 NSFW）。启用浏览器通道后再试。");
-        }
-
-        if (code == 404 && url.Contains("/private/", StringComparison.OrdinalIgnoreCase))
-            throw new XmaAccessException(
-                "下载直链返回 404：这类文件要带登录态的浏览器去取（NSFW）。启用浏览器通道后再试。");
-
-        throw new XmaHttpException(code, url, $"站点返回 HTTP {code}：{url}");
+        var reason = XmaBlockClassifier.Classify(code, body, cfMitigated);
+        throw new XmaAccessException(XmaBlockClassifier.Describe(reason), reason);
     }
 
     public void Dispose() => _gate.Dispose();

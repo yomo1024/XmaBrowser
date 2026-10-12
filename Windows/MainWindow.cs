@@ -117,7 +117,7 @@ public class MainWindow : Window
         ImGui.TextColored(Dim, "·");
         ImGui.SameLine();
         ImGui.TextColored(_viaChannel ? Yellow : Dim,
-            _viaChannel ? "本次通过浏览器通道读取" : "直连模式");
+            _viaChannel ? $"本次通过浏览器通道读取（{_viaChannelReason}）" : "直连模式");
         if (_plugin.Channel.Enabled)
         {
             ImGui.SameLine();
@@ -308,7 +308,7 @@ public class MainWindow : Window
         if (_detailViaChannel)
         {
             ImGui.SameLine();
-            ImGui.TextColored(Yellow, "　🌐 浏览器通道");
+            ImGui.TextColored(Yellow, $"　🌐 浏览器通道（{_detailChannelReason}）");
         }
         ImGui.Separator();
 
@@ -444,9 +444,11 @@ public class MainWindow : Window
                 {
                     if (ImGui.Button("取消")) _plugin.Jobs.Cancel(job.Id);
                 }
-                else
+                else if (job.UsedBrowserChannel)
                 {
-                    ImGui.TextColored(Dim, job.UsedBrowserChannel ? "🌐" : "");
+                    ImGui.TextColored(Yellow, "🌐");
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("这次下载走了浏览器通道：" + job.BrowserReason);
                 }
 
                 ImGui.PopID();
@@ -547,6 +549,17 @@ public class MainWindow : Window
 
         var autoPick = cfg.AutoPickProfile;
         if (ImGui.Checkbox("自动挑选可用浏览器", ref autoPick)) { cfg.AutoPickProfile = autoPick; changed = true; }
+
+        var fallback = cfg.AutoFallbackToBrowser;
+        if (ImGui.Checkbox("直连被拒时自动改用浏览器通道", ref fallback))
+        {
+            cfg.AutoFallbackToBrowser = fallback;
+            changed = true;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("站点做人机校验（Just a moment）时，**公开内容**也会直连被拒 ——\n" +
+                             "开着：自动交给浏览器通道完成（更慢但能成）；\n" +
+                             "关掉：直接报错，不做降级。");
 
         if (_browserReport.Length == 0)
         {
@@ -738,7 +751,7 @@ public class MainWindow : Window
                 {
                     result = await client.SearchAsync(query, ct).ConfigureAwait(false);
                 }
-                catch (XmaAccessException directDenied) when (channel.Enabled)
+                catch (XmaAccessException directDenied) when (channel.Enabled && cfg.AutoFallbackToBrowser)
                 {
                     // 直连被拒（Cloudflare 挑战 / 需要登录态）→ 交给浏览器通道重试一次
                     var html = await channel.GetHtmlAsync(XmaUrls.Search(query), ct).ConfigureAwait(false);
@@ -747,6 +760,7 @@ public class MainWindow : Window
 
                     result = XmaParser.ParseSearch(html, query.Page, XmaUrls.Search(query));
                     _viaChannel = true;
+                    _viaChannelReason = XmaBlockClassifier.ShortLabel(directDenied.Reason);
                 }
 
                 _hits = result.Hits;
@@ -792,6 +806,7 @@ public class MainWindow : Window
 
         var client = _plugin.Site;
         var channel = _plugin.Channel;
+        var cfg = _plugin.Configuration;
         var modId = hit.ModId;
         var pageUrl = XmaUrls.ModPage(modId);
 
@@ -801,7 +816,7 @@ public class MainWindow : Window
             {
                 _detail = await client.DetailAsync(modId).ConfigureAwait(false);
             }
-            catch (XmaAccessException) when (channel.Enabled)
+            catch (XmaAccessException directDenied) when (channel.Enabled && cfg.AutoFallbackToBrowser)
             {
                 try
                 {
@@ -819,6 +834,7 @@ public class MainWindow : Window
                         {
                             _detail = parsed;
                             _detailViaChannel = true;
+                            _detailChannelReason = XmaBlockClassifier.ShortLabel(directDenied.Reason);
                         }
                     }
                 }
@@ -829,7 +845,9 @@ public class MainWindow : Window
             }
             catch (XmaAccessException e)
             {
-                _error = e.Message + "（可在「设置」里启用浏览器通道）";
+                _error = e.Message + (_plugin.Configuration.AutoFallbackToBrowser
+                    ? "（可在「设置」里开启浏览器通道）"
+                    : "（「直连被拒时自动走浏览器通道」在设置里是关掉的）");
             }
             catch (Exception e)
             {
@@ -843,6 +861,8 @@ public class MainWindow : Window
     }
 
     private bool _detailViaChannel;
+    private string _detailChannelReason = string.Empty;
+    private string _viaChannelReason = string.Empty;
 
     private static string Fmt(DateTime? t) => t?.ToString("yyyy-MM-dd HH:mm") ?? "-";
 

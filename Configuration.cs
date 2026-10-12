@@ -64,6 +64,14 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
     // ---------------- 浏览器通道（NSFW 必需）----------------
 
     /// <summary>
+    /// 直连被站点拒绝时，自动改用浏览器通道。
+    ///
+    /// 关掉的用处：站点做人机校验（Just a moment）时，公开内容也会直连被拒 → 会一路落到浏览器通道，
+    /// 想「只要直连、失败就报错」的人可以关掉它。
+    /// </summary>
+    public bool AutoFallbackToBrowser { get; set; } = true;
+
+    /// <summary>
     /// 启用浏览器通道：需要登录/被 Cloudflare 拦的内容（NSFW）交给本机浏览器去取。
     /// 原理：把已登录浏览器的 Cookies + Local State 复制到插件自己的临时 profile，
     /// 用同一个浏览器 exe 起一个 headless 实例，通过 CDP 取页面与文件。用户无需登录操作。
