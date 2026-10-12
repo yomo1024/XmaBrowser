@@ -10,6 +10,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using XmaBrowser.Browser;
 using XmaBrowser.Diagnostics;
+using XmaBrowser.Favorites;
 using XmaBrowser.Install;
 using XmaBrowser.Site;
 using XmaBrowser.Translate;
@@ -52,6 +53,16 @@ public class MainWindow : Window
     // ---- NSFW 自检 ----
     private string _nsfwReport = string.Empty;
     private bool _nsfwChecking;
+
+    // ---- 收藏 / 关注 ----
+    /// <summary>点收藏条目的「详情」后自动切到浏览页（ImGui 的 SetSelected 只能在这一帧用）。</summary>
+    private bool _focusBrowseTab;
+
+    /// <summary>正在按作者搜（搜完要做「新品」对比）。</summary>
+    private string _authorFollowPending = string.Empty;
+
+    /// <summary>这次搜索里属于「关注作者的新品」的 modId（用来在列表里打标）。</summary>
+    private readonly HashSet<string> _authorNewIds = [];
     private bool _busy;
     private bool _viaChannel;
     private SearchHit? _selected;
@@ -98,7 +109,9 @@ public class MainWindow : Window
 
         if (ImGui.BeginTabBar("xma-tabs"))
         {
-            if (ImGui.BeginTabItem("浏览"))
+            var browseFlags = _focusBrowseTab ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+            _focusBrowseTab = false;
+            if (ImGui.BeginTabItem("浏览", browseFlags))
             {
                 DrawBrowseTab();
                 ImGui.EndTabItem();
@@ -109,6 +122,21 @@ public class MainWindow : Window
             if (ImGui.BeginTabItem(running > 0 ? $"队列 ({running})" : "队列"))
             {
                 DrawQueueTab();
+                ImGui.EndTabItem();
+            }
+
+            var favCount = _plugin.Configuration.Favorites.Count;
+            var authorCount = _plugin.Configuration.FollowedAuthors.Count;
+            var newCount = _plugin.Configuration.FollowedAuthors.Sum(a => a.NewModIds.Count);
+            var favLabel = (favCount, authorCount, newCount) switch
+            {
+                (0, 0, _) => "收藏·关注",
+                (_, _, > 0) => $"收藏·关注 ({favCount}/{authorCount}) 新品 {newCount}",
+                _ => $"收藏·关注 ({favCount}/{authorCount})",
+            };
+            if (ImGui.BeginTabItem(favLabel + "##fav"))
+            {
+                DrawFavoritesTab();
                 ImGui.EndTabItem();
             }
 
@@ -242,6 +270,16 @@ public class MainWindow : Window
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("勾上后，「关键词」框里的内容按站点标签精确检索。");
 
+        ImGui.SameLine();
+        var favOnly = _plugin.Configuration.FavoritesOnlyFilter;
+        if (ImGui.Checkbox("只看收藏", ref favOnly))
+        {
+            _plugin.Configuration.FavoritesOnlyFilter = favOnly;
+            _plugin.Configuration.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip($"只显示本页里已收藏的条目（本地过滤，不联网）。\n已收藏 {_plugin.Configuration.Favorites.Count} 条。");
+
         // 第三行：**页码单独一行** + 视图切换 + 批量翻译标题。
         // （原来翻页按钮被 SetCursorPosX 推到过滤条件那一行的最右端，窗口一窄就跑到可视区外，
         //   看起来就像「只有 15 条、没法翻页」。）
@@ -283,7 +321,241 @@ public class MainWindow : Window
 
     private static readonly string[] NsfwLabels = ["排除 NSFW", "含 NSFW（混合）", "只看 NSFW"];
 
-    /// <summary>页码控制条。单独一行，并在结果区底部再放一份（滚动到下面不用跑回顶部翻页）。</summary>
+    // ==================================================================== 收藏 / 关注
+
+    /// <summary>切换一条 Mod 的收藏状态并落盘。</summary>
+    private void ToggleFavorite(string modId, string title, string author, string type, string thumbUrl)
+    {
+        var cfg = _plugin.Configuration;
+        var nowFav = FavoriteStore.Toggle(cfg.Favorites, modId, title, author, type, thumbUrl);
+        cfg.Save();
+        if (!nowFav) Plugin.Log.Information($"[XmaBrowser] 已取消收藏 {modId}（{title}）");
+    }
+
+    /// <summary>切换关注的作者并落盘。</summary>
+    private void ToggleFollowAuthor(string author)
+    {
+        author = (author ?? string.Empty).Trim();
+        if (author.Length == 0) return;
+
+        var cfg = _plugin.Configuration;
+        var nowFollowing = FavoriteStore.ToggleAuthor(cfg.FollowedAuthors, author);
+        cfg.Save();
+        Plugin.Log.Information($"[XmaBrowser] {(nowFollowing ? "已关注" : "已取消关注")}作者 {author}");
+    }
+
+    /// <summary>按作者搜他的全部作品（顺带对比「自上次以来新增了哪几条」）。</summary>
+    private void OpenAuthorWorks(string author)
+    {
+        author = (author ?? string.Empty).Trim();
+        if (author.Length == 0) return;
+
+        _form.Reset();
+        _form.Author = author;
+        _form.SortIndex = 0;                                  // 最新发布
+        _form.NsfwMode = _plugin.Configuration.EffectiveNsfwMode;
+        _form.OnlyDtCompatible = false;                       // 看作者作品时别把旧版本兼容的过滤掉
+
+        _authorFollowPending = author;
+        _focusBrowseTab = true;
+        StartSearch(1);
+    }
+
+    /// <summary>收藏页点条目 → 切到浏览页并加载它的详情。</summary>
+    private void OpenFavoriteDetail(FavoriteMod fav)
+    {
+        _selected = new SearchHit
+        {
+            ModId = fav.ModId,
+            Title = fav.Title,
+            Author = fav.Author,
+            Type = fav.Type,
+            ThumbUrl = fav.ThumbUrl,
+        };
+        _previewIndex = 0;
+        LoadDetail(_selected);
+        _focusBrowseTab = true;
+    }
+
+    /// <summary>搜索完成后：如果这次是「关注作者」触发的，就算新品并落盘。</summary>
+    private void AfterSearchForFollowedAuthor()
+    {
+        if (_authorFollowPending.Length == 0) return;
+
+        var authorName = _authorFollowPending;
+        _authorFollowPending = string.Empty;
+        _authorNewIds.Clear();
+
+        var cfg = _plugin.Configuration;
+        var idx = FavoriteStore.IndexOfAuthor(cfg.FollowedAuthors, authorName);
+        if (idx < 0) return;
+
+        var fresh = FavoriteStore.DiffAndRemember(cfg.FollowedAuthors[idx], _hits.Select(h => h.ModId));
+        foreach (var id in fresh) _authorNewIds.Add(id);
+        cfg.Save();
+
+        _status += fresh.Count > 0
+            ? $"　·　关注的作者「{authorName}」有 {fresh.Count} 条新品"
+            : $"　·　「{authorName}」没有新品";
+    }
+
+    // ==================================================================== 收藏 / 关注 界面
+
+    /// <summary>详情页的收藏 / 关注 / 看他作品 三个按钮。</summary>
+    private void DrawFavoriteControls(ModDetail d, SearchHit hit)
+    {
+        var cfg = _plugin.Configuration;
+        var thumb = d.Images.Count > 0 ? d.Images[0] : hit.ThumbUrl;
+        var title = d.Title.Length > 0 ? d.Title : hit.Title;
+        var author = (d.Author.Length > 0 ? d.Author : hit.Author).Trim();
+
+        var isFav = FavoriteStore.IsFavorite(cfg.Favorites, d.ModId);
+        if (ImGui.Button(isFav ? "★ 已收藏" : "☆ 收藏"))
+            ToggleFavorite(d.ModId, title, author, d.Type, thumb);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("收藏到本地（离线也能在「收藏·关注」页看到、直接安装）。");
+
+        ImGui.SameLine();
+        ImGui.BeginDisabled(author.Length == 0);
+        var following = FavoriteStore.IsFollowing(cfg.FollowedAuthors, author);
+        if (ImGui.Button(following ? $"★ 已关注 {author}" : $"☆ 关注作者 {author}"))
+            ToggleFollowAuthor(author);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("关注作者（本地保存）。关注后可在「收藏·关注」页一键看他全部作品，\n并标出「你上次看过之后新增」的条目。");
+        ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        ImGui.BeginDisabled(author.Length == 0);
+        if (ImGui.Button("看他全部作品")) OpenAuthorWorks(author);
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("按作者搜他的全部作品（最新发布在前）。");
+
+        ImGui.Spacing();
+    }
+
+    /// <summary>「收藏·关注」页：左边收藏列表，右边关注的作者。</summary>
+    private void DrawFavoritesTab()
+    {
+        var cfg = _plugin.Configuration;
+        ImGui.TextColored(Dim, $"收藏 {cfg.Favorites.Count} 条（本地保存，离线可看）　关注的作者 {cfg.FollowedAuthors.Count} 位");
+        ImGui.Separator();
+
+        var avail = ImGui.GetContentRegionAvail().X;
+        ImGui.BeginChild("xma-fav-left", new Vector2(MathF.Max(430f, avail * 0.62f), 0));
+        DrawFavoriteList();
+        ImGui.EndChild();
+
+        ImGui.SameLine();
+        ImGui.BeginChild("xma-fav-right", new Vector2(0, 0));
+        DrawFollowedAuthors();
+        ImGui.EndChild();
+    }
+
+    private void DrawFavoriteList()
+    {
+        var cfg = _plugin.Configuration;
+        ImGui.TextColored(Blue, "收藏的 Mod");
+        if (cfg.Favorites.Count == 0)
+        {
+            ImGui.TextColored(Dim, "还没有收藏。在「浏览」页点每行最左边的 ☆，或详情页的「收藏」。");
+            return;
+        }
+
+        const ImGuiTableFlags flags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
+                                     ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingFixedFit;
+        if (ImGui.BeginTable("xma-fav-table", 5, flags))
+        {
+            ImGui.TableSetupScrollFreeze(0, 1);
+            ImGui.TableSetupColumn("图", ImGuiTableColumnFlags.WidthFixed, 70);
+            ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthStretch);
+            ImGui.TableSetupColumn("作者", ImGuiTableColumnFlags.WidthFixed, 110);
+            ImGui.TableSetupColumn("收藏于", ImGuiTableColumnFlags.WidthFixed, 96);
+            ImGui.TableSetupColumn("操作", ImGuiTableColumnFlags.WidthFixed, 108);
+            ImGui.TableHeadersRow();
+
+            // 复制一份再遍历：按钮里会改集合
+            foreach (var fav in cfg.Favorites.ToList())
+            {
+                ImGui.TableNextRow();
+                ImGui.PushID("fav-" + fav.ModId);
+
+                ImGui.TableNextColumn();
+                var wrap = _plugin.Thumbs.Get(fav.ThumbUrl)?.GetWrapOrDefault();
+                if (wrap is not null) ImGui.Image(wrap.Handle, Fit(wrap.Size, 64f, 40f));
+                else ImGui.Dummy(new Vector2(64, 40));
+
+                ImGui.TableNextColumn();
+                var zh = cfg.ShowTranslatedTitles ? _plugin.Translator.Cached(fav.Title) : null;
+                if (ImGui.Selectable(zh is { Length: > 0 } ? zh : fav.Title, false))
+                    OpenFavoriteDetail(fav);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip($"{fav.Title}\n{fav.Author} · {fav.Type}\n站点 id {fav.ModId}\n点击在浏览页打开详情");
+
+                ImGui.TableNextColumn();
+                if (ImGui.SmallButton(fav.Author.Length > 0 ? fav.Author : "(无)"))
+                    OpenAuthorWorks(fav.Author);
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("看他全部作品");
+
+                ImGui.TableNextColumn();
+                ImGui.TextColored(Dim, fav.AddedUtc.ToLocalTime().ToString("yyyy-MM-dd"));
+
+                ImGui.TableNextColumn();
+                if (ImGui.SmallButton("详情")) OpenFavoriteDetail(fav);
+                ImGui.SameLine();
+                if (ImGui.SmallButton("取消"))
+                {
+                    FavoriteStore.Unfavorite(cfg.Favorites, fav.ModId);
+                    cfg.Save();
+                }
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("取消收藏");
+
+                ImGui.PopID();
+            }
+
+            ImGui.EndTable();
+        }
+    }
+
+    private void DrawFollowedAuthors()
+    {
+        var cfg = _plugin.Configuration;
+        ImGui.TextColored(Blue, "关注的作者");
+        if (cfg.FollowedAuthors.Count == 0)
+        {
+            ImGui.TextColored(Dim, "还没有关注作者。在详情页点「☆ 关注作者 xxx」。");
+            return;
+        }
+
+        foreach (var a in cfg.FollowedAuthors.ToList())
+        {
+            ImGui.PushID("fa-" + a.Name);
+            ImGui.TextUnformatted(a.Name);
+            if (a.NewModIds.Count > 0)
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(Green, $"新品 {a.NewModIds.Count}");
+            }
+
+            var last = a.LastCheckedUtc.Year > 2000 ? a.LastCheckedUtc.ToLocalTime().ToString("MM-dd HH:mm") : "还没看过";
+            ImGui.TextColored(Dim, $"关注于 {a.AddedUtc.ToLocalTime():yyyy-MM-dd}　上次查看 {last}　已记录 {a.SeenModIds.Count} 条");
+
+            if (ImGui.SmallButton("看他作品")) OpenAuthorWorks(a.Name);
+            ImGui.SameLine();
+            if (ImGui.SmallButton("已看过")) FavoriteStore.MarkAuthorRead(a);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("清掉「新品」标记（不改变已记录的条目）");
+            ImGui.SameLine();
+            if (ImGui.SmallButton("取消关注"))
+            {
+                FavoriteStore.Unfollow(cfg.FollowedAuthors, a.Name);
+                cfg.Save();
+            }
+
+            ImGui.Separator();
+            ImGui.PopID();
+        }
+    }
+
     private void DrawPager(string id)
     {
         var totalPages = _totalMods > 0 ? (_totalMods + SitePageSize - 1) / SitePageSize : 0;
@@ -438,19 +710,32 @@ public class MainWindow : Window
         }, ct);
     }
 
+    /// <summary>当前该显示的条目（受「只看收藏」本地过滤影响）。</summary>
+    private List<SearchHit> VisibleHits()
+    {
+        if (!_plugin.Configuration.FavoritesOnlyFilter) return _hits;
+        var favs = _plugin.Configuration.Favorites;
+        return _hits.Where(h => FavoriteStore.IsFavorite(favs, h.ModId)).ToList();
+    }
+
     private void DrawResultList()
     {
-        if (_hits.Count == 0)
+        var hits = VisibleHits();
+        if (hits.Count == 0)
         {
-            ImGui.TextColored(Dim, _busy ? "搜索中…" : "还没有结果。敲关键词回车，或直接点「搜索」看最新发布。");
+            if (_hits.Count > 0 && _plugin.Configuration.FavoritesOnlyFilter)
+                ImGui.TextColored(Dim, $"本页 {_hits.Count} 条里没有已收藏的 —— 取消下面的「只看收藏」看全部。");
+            else
+                ImGui.TextColored(Dim, _busy ? "搜索中…" : "还没有结果。敲关键词回车，或直接点「搜索」看最新发布。");
             return;
         }
 
         const ImGuiTableFlags flags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
                                      ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingFixedFit;
-        if (ImGui.BeginTable("xma-hits", 6, flags))
+        if (ImGui.BeginTable("xma-hits", 7, flags))
         {
             ImGui.TableSetupScrollFreeze(0, 1);
+            ImGui.TableSetupColumn("★", ImGuiTableColumnFlags.WidthFixed, 30);
             ImGui.TableSetupColumn("图", ImGuiTableColumnFlags.WidthFixed, 74);
             ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthStretch);
             ImGui.TableSetupColumn("作者", ImGuiTableColumnFlags.WidthFixed, 116);
@@ -459,10 +744,17 @@ public class MainWindow : Window
             ImGui.TableSetupColumn("标记", ImGuiTableColumnFlags.WidthFixed, 52);
             ImGui.TableHeadersRow();
 
-            foreach (var hit in _hits)
+            foreach (var hit in hits)
             {
                 ImGui.TableNextRow();
                 ImGui.PushID(hit.ModId);
+
+                ImGui.TableNextColumn();
+                var isFav = FavoriteStore.IsFavorite(_plugin.Configuration.Favorites, hit.ModId);
+                if (ImGui.Button(isFav ? "★" : "☆", new Vector2(26, 0)))
+                    ToggleFavorite(hit.ModId, hit.Title, hit.Author, hit.Type, hit.ThumbUrl);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(isFav ? "取消收藏" : "收藏（本地保存，离线可看）");
 
                 ImGui.TableNextColumn();
                 var wrap = _plugin.Thumbs.Get(hit.ThumbUrl)?.GetWrapOrDefault();
@@ -491,7 +783,8 @@ public class MainWindow : Window
                 ImGui.TextUnformatted(hit.Views > 0 ? hit.Views.ToString() : "-");
 
                 ImGui.TableNextColumn();
-                if (hit.IsNew) ImGui.TextColored(Green, "NEW");
+                if (_authorNewIds.Contains(hit.ModId)) ImGui.TextColored(Green, "新品");
+                else if (hit.IsNew) ImGui.TextColored(Green, "NEW");
                 else if (hit.IsUpdated) ImGui.TextColored(Yellow, "UPD");
 
                 ImGui.PopID();
@@ -508,9 +801,13 @@ public class MainWindow : Window
 
     private void DrawResultGrid()
     {
-        if (_hits.Count == 0)
+        var hits = VisibleHits();
+        if (hits.Count == 0)
         {
-            ImGui.TextColored(Dim, _busy ? "搜索中…" : "还没有结果。敲关键词回车，或直接点「搜索」看最新发布。");
+            if (_hits.Count > 0 && _plugin.Configuration.FavoritesOnlyFilter)
+                ImGui.TextColored(Dim, $"本页 {_hits.Count} 条里没有已收藏的 —— 取消「只看收藏」看全部。");
+            else
+                ImGui.TextColored(Dim, _busy ? "搜索中…" : "还没有结果。敲关键词回车，或直接点「搜索」看最新发布。");
             return;
         }
 
@@ -522,11 +819,11 @@ public class MainWindow : Window
 
         if (ImGui.BeginTable("xma-grid", cols, ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingFixedFit))
         {
-            for (var i = 0; i < _hits.Count; i++)
+            for (var i = 0; i < hits.Count; i++)
             {
                 if (i % cols == 0) ImGui.TableNextRow();
                 ImGui.TableNextColumn();
-                DrawGridCard(_hits[i], cardW);
+                DrawGridCard(hits[i], cardW);
             }
             ImGui.EndTable();
         }
@@ -554,9 +851,21 @@ public class MainWindow : Window
 
         var zh = cfg.ShowTranslatedTitles ? _plugin.Translator.Cached(hit.Title) : null;
         var title = zh is { Length: > 0 } ? zh : hit.Title;
-        ImGui.TextUnformatted(Clip(title, 32));
+        var isFav = FavoriteStore.IsFavorite(cfg.Favorites, hit.ModId);
+        if (ImGui.SmallButton(isFav ? "★" : "☆"))
+            ToggleFavorite(hit.ModId, hit.Title, hit.Author, hit.Type, hit.ThumbUrl);
+        var starHovered = ImGui.IsItemHovered();
+        if (starHovered) ImGui.SetTooltip(isFav ? "取消收藏" : "收藏（本地保存，离线可看）");
+
+        ImGui.SameLine();
+        ImGui.TextUnformatted(Clip(title, 30));
         ImGui.TextColored(Dim, Clip($"{hit.Type} · {hit.Author}", 26));
-        if (hit.IsNew)
+        if (_authorNewIds.Contains(hit.ModId))
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(Green, "新品");
+        }
+        else if (hit.IsNew)
         {
             ImGui.SameLine();
             ImGui.TextColored(Green, "NEW");
@@ -568,7 +877,8 @@ public class MainWindow : Window
         }
 
         // 悬停/点击必须在子窗口内部判定（EndChild 之后 IsWindowHovered 指的是父窗口）
-        var hovered = ImGui.IsWindowHovered();
+        // 鼠标在 ★ 上时不算「点卡片」，否则点收藏会顺手把详情也切了。
+        var hovered = ImGui.IsWindowHovered() && !starHovered;
         var clicked = hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left);
 
         ImGui.EndChild();
@@ -627,6 +937,7 @@ public class MainWindow : Window
 
         ImGui.TextColored(Dim, $"作者 {d.Author}　类型 {d.Type}　站点 id {d.ModId}");
         ImGui.TextColored(Dim, $"最后更新 {Fmt(d.LastUpdateLocal)}　发布 {Fmt(d.ReleaseLocal)}");
+        DrawFavoriteControls(d, hit);
         DrawTranslateControls(d);
         if (_detailViaChannel)
         {
@@ -1555,6 +1866,9 @@ public class MainWindow : Window
                 _status = result.Hits.Count == 0
                     ? "这一页没有结果 —— 换个关键词，或放宽筛选"
                     : $"第 {page} 页，本页 {result.Hits.Count} 条";
+
+                // 如果是「关注作者 → 看他作品」触发的，顺手算一下自上次以来的新品
+                AfterSearchForFollowedAuthor();
                 _plugin.Thumbs.Trim();
 
                 cfg.OnlyDtCompatible = _form.OnlyDtCompatible;

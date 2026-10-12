@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using XmaBrowser.Browser;
 using XmaBrowser.Cover;
 using XmaBrowser.Diagnostics;
+using XmaBrowser.Favorites;
 using XmaBrowser.Install;
 using XmaBrowser.Site;
 using XmaBrowser.Translate;
@@ -18,6 +19,7 @@ var live = args.Contains("live");
 var translateOnly = args.Contains("translate");
 var nsfwProbe = args.Contains("nsfw");
 var nsfwDiag = args.Contains("nsfwdiag");
+var authorProbe = args.Contains("author");
 var pass = 0;
 var fail = 0;
 
@@ -441,6 +443,62 @@ Console.WriteLine("=== 13c. 站点登录态判定（标记来自实测对比）=
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 13d. 收藏 / 关注（本地逻辑，不联网）===");
+{
+    var favs = new List<FavoriteMod>();
+    Check("初始没收藏", !FavoriteStore.IsFavorite(favs, "100"));
+    Check("收藏返回 true", FavoriteStore.Toggle(favs, "100", "T", "A", "Gear", "u"));
+    Check("收藏后查得到", FavoriteStore.IsFavorite(favs, "100"));
+    Check("再切一次 = 取消", !FavoriteStore.Toggle(favs, "100", "T", "A", "Gear", "u"));
+    Check("取消后查不到", !FavoriteStore.IsFavorite(favs, "100"));
+    Check("取消不存在的返回 false", !FavoriteStore.Unfavorite(favs, "999"));
+
+    FavoriteStore.Toggle(favs, "1", "first", "a", "t", "u");
+    FavoriteStore.Toggle(favs, "2", "second", "a", "t", "u");
+    Check("新收藏排在最前", favs[0].ModId == "2" && favs[1].ModId == "1", string.Join(",", favs.Select(f => f.ModId)));
+
+    var many = new List<FavoriteMod>();
+    for (var i = 0; i < FavoriteStore.MaxFavorites + 25; i++)
+        FavoriteStore.Toggle(many, i.ToString(), "t", "a", "t", "u");
+    Check($"条数被截到上限 {FavoriteStore.MaxFavorites}", many.Count == FavoriteStore.MaxFavorites, many.Count.ToString());
+    Check("丢掉的是最早收藏的", many.All(f => f.ModId != "0"));
+
+    var dup = new List<FavoriteMod>();
+    FavoriteStore.Toggle(dup, "x", "t", "a", "t", "u");
+    FavoriteStore.Toggle(dup, "x", "t", "a", "t", "u");
+    FavoriteStore.Toggle(dup, "x", "t", "a", "t", "u");
+    Check("同一 modId 不会重复", dup.Count == 1, dup.Count.ToString());
+
+    var authors = new List<FollowedAuthor>();
+    Check("关注作者返回 true", FavoriteStore.ToggleAuthor(authors, " Sadanoya "));
+    Check("名字去空格 + 大小写不敏感都能查到", FavoriteStore.IsFollowing(authors, "sadanoya"));
+    Check("重复关注 = 取消", !FavoriteStore.ToggleAuthor(authors, "Sadanoya"));
+    Check("空名字不关注", !FavoriteStore.ToggleAuthor(authors, "   ") && authors.Count == 0);
+
+    FavoriteStore.ToggleAuthor(authors, "Sadanoya");
+    var author = authors[0];
+    var first = FavoriteStore.DiffAndRemember(author, ["m1", "m2"]);
+    Check("首次关注不算新品（否则一关注就报「新增 2 条」）", first.Count == 0, first.Count.ToString());
+    Check("已见集合记了 2 条", author.SeenModIds.Count == 2);
+    var second = FavoriteStore.DiffAndRemember(author, ["m2", "m3", "m4"]);
+    Check("第二次比出 2 条新品", second.Count == 2 && second.Contains("m3") && second.Contains("m4"),
+          string.Join(",", second));
+    Check("新品写进 author.NewModIds", author.NewModIds.Count == 2);
+    Check("没有新东西时为 0", FavoriteStore.DiffAndRemember(author, ["m1", "m2", "m3", "m4"]).Count == 0);
+    FavoriteStore.MarkAuthorRead(author);
+    Check("「已看过」后新品清零", author.NewModIds.Count == 0);
+
+    for (var i = 0; i < FavoriteStore.MaxSeenIds + 40; i++)
+        FavoriteStore.DiffAndRemember(author, [$"s{i}"]);
+    Check($"已见集合也被截到上限 {FavoriteStore.MaxSeenIds}", author.SeenModIds.Count == FavoriteStore.MaxSeenIds,
+          author.SeenModIds.Count.ToString());
+
+    var hit = new SearchHit { ModId = "777", Title = "T", Author = "A", Type = "Gear", ThumbUrl = "u" };
+    var fromHit = FavoriteStore.FromHit(hit);
+    Check("FromHit 带上 id/标题/图", fromHit.ModId == "777" && fromHit.Title == "T" && fromHit.ThumbUrl == "u");
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 13. 翻译：分段逻辑（离线）===");
 {
     var para = string.Join("\n", Enumerable.Range(0, 40).Select(i => $"This is sentence number {i} of the description."));
@@ -680,6 +738,51 @@ if (nsfwDiag)
     using var diagChannel = new BrowserChannel(diagSettings, new NullLog());
     var diagReport = await NsfwDiagnostics.RunAsync(diagChannel, diagSettings, CancellationToken.None);
     Console.WriteLine(diagReport);
+}
+
+if (authorProbe)
+{
+    Console.WriteLine();
+    Console.WriteLine("=== author= 匹配语义实测（用插件的解析器，别用正则猜）===");
+    var aSettings = new TestSettings();
+    var aCache = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "author");
+    Directory.CreateDirectory(aCache);
+    using var aHttp = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+    using var aClient = new XmaClient(aHttp, aSettings, aCache, new NullLog());
+
+    var baseRes = await aClient.SearchAsync(new SearchQuery { Page = 1 }, CancellationToken.None);
+    var authors = baseRes.Hits.Select(h => h.Author).Where(a => a.Trim().Length > 0)
+                            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    Console.WriteLine("   最新发布首页的作者：" + string.Join(" / ", authors.Take(6)));
+    if (authors.Count == 0)
+    {
+        Console.WriteLine("   解析不到作者名，跳过。");
+    }
+    else
+    {
+        var target = authors.FirstOrDefault(a => a.All(c => c < 128)) ?? authors[0];
+        Console.WriteLine($"   拿作者「{target}」做试验：");
+        foreach (var (label, value) in new[]
+                 {
+                     ("精确名", target),
+                     ("全小写", target.ToLowerInvariant()),
+                     ("前 4 字前缀", target.Length > 4 ? target[..4] : target),
+                     ("不存在的名字", "zzzz_no_such_author_zzzz"),
+                 })
+        {
+            try
+            {
+                var q = new SearchQuery { Author = value, Page = 1, NsfwMode = 1 };
+                var r = await aClient.SearchAsync(q, CancellationToken.None);
+                var same = r.Hits.Count(h => h.Author.Equals(target, StringComparison.OrdinalIgnoreCase));
+                Console.WriteLine($"   author=\"{value}\"（{label}）→ 总数 {r.TotalMods}，本页 {r.Hits.Count} 条，其中作者等于「{target}」的 {same} 条");
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"   author=\"{value}\"（{label}）→ 失败：{e.Message}");
+            }
+        }
+    }
 }
 
 Console.WriteLine();

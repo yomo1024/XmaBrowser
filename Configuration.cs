@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using Dalamud.Configuration;
 using XmaBrowser.Browser;
+using XmaBrowser.Favorites;
 using XmaBrowser.Site;
 using XmaBrowser.Translate;
 
@@ -173,6 +175,17 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
 
     /// <summary>下载完成/失败是否在聊天框提示。</summary>
     public bool NotifyInChat { get; set; } = true;
+
+    // ---------------- 收藏 / 关注（全部存本地，不依赖站点登录）----------------
+
+    /// <summary>收藏的 Mod（新的在前）。</summary>
+    public List<FavoriteMod> Favorites { get; set; } = [];
+
+    /// <summary>关注的作者（新的在前）。</summary>
+    public List<FollowedAuthor> FollowedAuthors { get; set; } = [];
+
+    /// <summary>浏览页是否只显示已收藏的（本地过滤，不联网）。</summary>
+    public bool FavoritesOnlyFilter { get; set; }
 
     /// <summary>给三态值做个夹取（越界/未迁移都当 0）。</summary>
     public int EffectiveNsfwMode => NsfwMode is 1 or 2 ? NsfwMode : 0;

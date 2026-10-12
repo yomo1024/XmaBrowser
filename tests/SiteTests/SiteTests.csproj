@@ -40,6 +40,7 @@
     <Compile Include="..\..\Translate\Translator.cs" />
     <Compile Include="..\..\Translate\ProxyInfo.cs" />
     <Compile Include="..\..\Diagnostics\NsfwDiagnostics.cs" />
+    <Compile Include="..\..\Favorites\FavoriteStore.cs" />
   </ItemGroup>
 
   <ItemGroup>
