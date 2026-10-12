@@ -66,17 +66,24 @@
 
 ### 方式二：自定义插件源（推荐，能在线更新）
 
-Dalamud → 设置 → 实验性 → **自定义插件源** → 粘贴：
+Dalamud → 设置 → 实验性 → **自定义插件源** → 粘贴（主地址）：
 
 ```
-https://cdn.jsdelivr.net/gh/yomo1024/XmaBrowser@main/pluginmaster.json
+https://raw.githubusercontent.com/yomo1024/XmaBrowser/main/pluginmaster.json
 ```
 
-（jsdelivr 没缓存时用备用地址：`https://raw.githubusercontent.com/yomo1024/XmaBrowser/main/pluginmaster.json`）
+主地址不通时用备选（下载走 jsdelivr，国内多数网络更快）：
+
+```
+https://cdn.jsdelivr.net/gh/yomo1024/XmaBrowser@main/pluginmaster-cdn.json
+```
+
 然后在插件列表里搜 **XMA Browser** 安装即可。
 
-> 下载链接走 jsdelivr 指向仓库内 `dist/` 里的 zip —— 所以**不发 GitHub Release 也能在线更新**；
-> 想改走 Release 附件时，把源换成 `dist/pluginmaster-gh.json` 即可（需先建对应 Release）。
+> **注意**：加了源之后如果列表里压根看不到这个插件，说明清单没取到（不是安装失败）。
+> 用那台机器的浏览器打开上面的地址：能看到 JSON 文本 = 网络没问题（换个源重试）；打不开 = 网络到不了，改用「方式一」本地安装。
+>
+> jsdelivr 对**新建仓库的新路径**会先返回 404（负缓存），要 `https://purge.jsdelivr.net/gh/yomo1024/XmaBrowser@main/<文件名>` 刷一下才生效 —— 这就是主地址用 raw 的原因。
 
 ---
 
