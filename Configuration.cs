@@ -41,6 +41,23 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
     /// <summary>缩略图磁盘缓存上限（MB），超出按最久未用淘汰。</summary>
     public int ThumbCacheMb { get; set; } = 256;
 
+    // ---------------- 装进文件夹（Penumbra 列表里就是折叠组）----------------
+
+    /// <summary>
+    /// 安装时把 Mod 归进文件夹。Penumbra 的 mod 列表是文件系统树，文件夹即折叠组。
+    /// 实现：装完调 SetModPath(dir, name, 模板算出的路径)。
+    /// </summary>
+    public bool GroupIntoFolders { get; set; } = true;
+
+    /// <summary>
+    /// 分组路径模板。占位符：{prefix} {type} {author} {modid} {name}
+    /// 例如 "{prefix}/{type}" → XMA/Gear/MyMod；留空 = 不分组。
+    /// </summary>
+    public string GroupTemplate { get; set; } = "{prefix}/{type}";
+
+    /// <summary>{prefix} 的值（默认 XMA，便于认出「这是这个插件装进来的」）。</summary>
+    public string GroupPrefix { get; set; } = "XMA";
+
     // ---------------- 封面（Penumbra 面板里画图 + 随包交付）----------------
 
     /// <summary>在 Penumbra 的 mod 面板里画自己装进去的封面。</summary>

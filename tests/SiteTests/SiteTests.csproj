@@ -26,6 +26,7 @@
     <Compile Include="..\..\Site\XmaParser.cs" />
     <Compile Include="..\..\Site\XmaClient.cs" />
     <Compile Include="..\..\Install\PackageResolver.cs" />
+    <Compile Include="..\..\Install\GroupPath.cs" />
     <Compile Include="..\..\Install\Archives\IArchiveReader.cs" />
     <Compile Include="..\..\Cover\CoverContext.cs" />
     <Compile Include="..\..\Cover\CoverLocator.cs" />

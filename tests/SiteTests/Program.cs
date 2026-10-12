@@ -307,6 +307,45 @@ finally
     try { Directory.Delete(ctmp, true); } catch { /* 忽略 */ }
 }
 
+Console.WriteLine();
+Console.WriteLine("=== 11. 装进文件夹：路径模板计算 ===");
+Check("默认模板 {prefix}/{type} → XMA/Gear",
+      GroupPath.BuildFolder("{prefix}/{type}", "XMA", "Gear", "someone", "123", "My Mod") == "XMA/Gear",
+      GroupPath.BuildFolder("{prefix}/{type}", "XMA", "Gear", "someone", "123", "My Mod"));
+Check("类型为空 → Other（不出现空段）",
+      GroupPath.BuildFolder("{prefix}/{type}", "XMA", "", "someone", "123", "My Mod") == "XMA/Other",
+      GroupPath.BuildFolder("{prefix}/{type}", "XMA", "", "someone", "123", "My Mod"));
+Check("前缀留空 → 只剩类型",
+      GroupPath.BuildFolder("{prefix}/{type}", "", "Hair", "someone", "123", "My Mod") == "Hair",
+      GroupPath.BuildFolder("{prefix}/{type}", "", "Hair", "someone", "123", "My Mod"));
+Check("模板留空 → 不分组", GroupPath.BuildFolder("", "XMA", "Gear", "a", "1", "n") == "");
+Check("三级模板 {prefix}/{type}/{author}",
+      GroupPath.BuildFolder("{prefix}/{type}/{author}", "XMA", "Gear", "Some Author", "1", "n") == "XMA/Gear/Some Author",
+      GroupPath.BuildFolder("{prefix}/{type}/{author}", "XMA", "Gear", "Some Author", "1", "n"));
+Check("占位符大小写不敏感",
+      GroupPath.BuildFolder("{PREFIX}/{Type}", "XMA", "Gear", "a", "1", "n") == "XMA/Gear");
+Check("非法字符被替换（冒号/星号/竖线）",
+      GroupPath.BuildFolder("{prefix}/{type}", "X:MA", "Ge*ar|X", "a", "1", "n") == "X_MA/Ge_ar_X",
+      GroupPath.BuildFolder("{prefix}/{type}", "X:MA", "Ge*ar|X", "a", "1", "n"));
+Check("目录穿越段被丢掉（.. 不进路径）",
+      !GroupPath.BuildFolder("{prefix}/{type}", "..", "../Gear", "a", "1", "n").Contains(".."),
+      GroupPath.BuildFolder("{prefix}/{type}", "..", "../Gear", "a", "1", "n"));
+Check("深层级被限制在 4 层内",
+      GroupPath.BuildFolder("{prefix}/{type}/{author}/{modid}/{name}", "X", "T", "A", "1", "N").Split('/').Length == 4);
+Check("段内超长被截断",
+      GroupPath.SanitizeSegment(new string('x', 200)).Length == 48);
+Check("完整路径 = 文件夹 + 当前目录名",
+      GroupPath.BuildFullPath("XMA/Gear", "My Mod") == "XMA/Gear/My Mod",
+      GroupPath.BuildFullPath("XMA/Gear", "My Mod"));
+Check("不分组时完整路径就是目录名",
+      GroupPath.BuildFullPath("", "My Mod") == "My Mod");
+Check("安全检查：正常相对路径通过", GroupPath.IsSafeRelativePath("XMA/Gear/My Mod"));
+Check("安全检查：绝对路径/盘符/穿越被拒",
+      !GroupPath.IsSafeRelativePath("/etc/passwd") && !GroupPath.IsSafeRelativePath("C:/x") &&
+      !GroupPath.IsSafeRelativePath("XMA/../../x"));
+Check("预览文案可用", GroupPath.Describe("{prefix}/{type}", "XMA").Contains("XMA/Gear/My Mod"),
+      GroupPath.Describe("{prefix}/{type}", "XMA"));
+
 if (live)
 {
     var cacheDir = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "live");    Directory.CreateDirectory(cacheDir);

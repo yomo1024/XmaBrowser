@@ -23,6 +23,7 @@ public sealed class PenumbraBridge : IDisposable, Cover.CoverContext
     private readonly GetCollection _getCollection;
     private readonly InstallMod _installMod;
     private readonly AddMod _addMod;
+    private readonly SetModPath _setModPath;
     private readonly ReloadMod _reloadMod;
     private readonly TrySetMod _trySetMod;
     private readonly TrySetModPriority _trySetModPriority;
@@ -48,6 +49,7 @@ public sealed class PenumbraBridge : IDisposable, Cover.CoverContext
         _getCollection = new GetCollection(pi);
         _installMod = new InstallMod(pi);
         _addMod = new AddMod(pi);
+        _setModPath = new SetModPath(pi);
         _reloadMod = new ReloadMod(pi);
         _trySetMod = new TrySetMod(pi);
         _trySetModPriority = new TrySetModPriority(pi);
@@ -113,6 +115,13 @@ public sealed class PenumbraBridge : IDisposable, Cover.CoverContext
 
     public string Add(string modDirectoryName)
         => Call(nameof(Add), () => _addMod.Invoke(modDirectoryName).ToString());
+
+    /// <summary>
+    /// 改 mod 的路径（可带文件夹）—— 内部是 Penumbra 的 RenameAndMove，
+    /// 所以这是「把 Mod 归进折叠组」的官方手段。
+    /// </summary>
+    public string SetPath(string modDirectory, string modName, string newPath)
+        => Call(nameof(SetPath), () => _setModPath.Invoke(modDirectory, modName, newPath).ToString());
 
     public string Reload(string modDirectory, string modName)
         => Call(nameof(Reload), () => _reloadMod.Invoke(modDirectory, modName).ToString());

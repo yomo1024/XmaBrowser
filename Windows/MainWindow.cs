@@ -503,6 +503,44 @@ public class MainWindow : Window
         if (ImGui.Button("打开##cache")) OpenExternal(_plugin.Site.CacheDirectory);
 
         ImGui.Spacing();
+        ImGui.TextColored(Blue, "装进文件夹（Penumbra 的列表里就是可折叠的组）");
+        ImGui.Separator();
+        var group = cfg.GroupIntoFolders;
+        if (ImGui.Checkbox("安装时把 Mod 归入文件夹", ref group)) { cfg.GroupIntoFolders = group; changed = true; }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Penumbra 的 mod 列表是文件系统树，文件夹就是折叠组。\n" +
+                             "插件装完后会调 SetModPath 把 Mod 移进下面模板算出的文件夹。");
+
+        ImGui.BeginDisabled(!cfg.GroupIntoFolders);
+        ImGui.TextUnformatted("路径模板");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(300);
+        var tpl = cfg.GroupTemplate;
+        if (ImGui.InputTextWithHint("##grp-tpl", "如 {prefix}/{type}", ref tpl, 160))
+        {
+            cfg.GroupTemplate = tpl;
+            changed = true;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("可用占位符：{prefix} 前缀 / {type} 站点类型（Gear、Hair…）/ {author} 作者 / {modid} / {name}\n" +
+                             "用 / 分层；留空 = 不分组。");
+
+        ImGui.TextUnformatted("前缀");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(160);
+        var pfx = cfg.GroupPrefix;
+        if (ImGui.InputTextWithHint("##grp-pfx", "XMA", ref pfx, 40))
+        {
+            cfg.GroupPrefix = pfx;
+            changed = true;
+        }
+
+        ImGui.TextColored(Dim, "效果预览：" + GroupPath.Describe(cfg.GroupTemplate, cfg.GroupPrefix));
+        ImGui.TextColored(Dim, "提示：Penumbra 自带「默认导入文件夹」（右键文件夹 → Set Folder as...），" +
+                               "那是它自己的全局设置；插件这个只管自己装进来的 Mod，可以按类型/作者分得更细。");
+        ImGui.EndDisabled();
+
+        ImGui.Spacing();
         ImGui.TextColored(Blue, "封面（Penumbra 里显示 Mod 预览图）");
         ImGui.Separator();
         var draw = cfg.DrawCovers;

@@ -45,6 +45,8 @@ public sealed class InstallJob
     public bool UsedBrowserChannel { get; set; }
     /// <summary>走浏览器通道的原因（站点人机校验 / 需要登录态 / 直链需浏览器）。</summary>
     public string BrowserReason { get; set; } = string.Empty;
+    /// <summary>站点上的类型（Gear / Hair / Skin…），用于装进文件夹的分组。</summary>
+    public string SiteType { get; init; } = string.Empty;
     public DateTime StartedUtc { get; } = DateTime.UtcNow;
 
     public bool Finished => State is JobState.Done or JobState.Error or JobState.Cancelled;
@@ -99,6 +101,7 @@ public sealed class InstallQueue : IDisposable
             Author = detail.Author,
             Url = detail.AbsoluteDownloadUrl,
             CoverUrl = coverUrl.Length > 0 ? coverUrl : (detail.Images.Count > 0 ? detail.Images[0] : string.Empty),
+            SiteType = detail.Type,
             FileName = PackageResolver.SafeModDirName(detail.FileNameHint, $"mod-{detail.ModId}"),
             Message = "排队中…",
         };
@@ -363,6 +366,16 @@ public sealed class InstallQueue : IDisposable
             job.Message += "，已重绘";
         }
 
+        // ---------- 4.5) 归入文件夹（Penumbra 的列表里就是可折叠的组）----------
+        if (_cfg.GroupIntoFolders)
+        {
+            var folder = GroupPath.BuildFolder(_cfg.GroupTemplate, _cfg.GroupPrefix, job.SiteType,
+                                               job.Author, job.ModId, job.Title);
+            var affected = newDirs.Concat(addedNames).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (folder.Length > 0 && affected.Count > 0)
+                GroupInstalled(job, folder, affected);
+        }
+
         // ---------- 5) 收尾 ----------
         if (_cfg.CleanupAfterInstall)
         {
@@ -382,6 +395,109 @@ public sealed class InstallQueue : IDisposable
 
     private static string Mb(long n) => n > 1048576 ? (n / 1048576.0).ToString("0.0") + "MB"
                                                      : Math.Max(1, n / 1024) + "KB";
+
+    /// <summary>
+    /// 把刚装好的 Mod 移进文件夹（Penumbra 列表里就是折叠组）。
+    ///
+    /// 用 SetModPath（内部是 Penumbra 的 RenameAndMove）；目标文件夹先落盘，
+    /// 因为 RenameAndMove 未必会自己创建中间目录（Penumbra 自己的「默认导入文件夹」
+    /// 也是先 FindOrCreateAllFolders 再挪）。
+    /// </summary>
+    private void GroupInstalled(InstallJob job, string folder, List<string> dirs)
+    {
+        var modRoot = _penumbra.ModDirectory;
+        if (string.IsNullOrEmpty(modRoot))
+        {
+            _log.Warn("拿不到 Penumbra 的 mod 目录，跳过归入文件夹");
+            return;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(modRoot, folder.Replace('/', Path.DirectorySeparatorChar)));
+        }
+        catch (Exception e)
+        {
+            _log.Debug($"预建目标文件夹失败（继续尝试移动）：{e.Message}");
+        }
+
+        var moved = 0;
+        var failed = 0;
+        foreach (var dir in dirs)
+        {
+            var (curDir, curName) = ResolveMod(dir, job.Title);
+            var target = GroupPath.BuildFullPath(folder, curDir);
+            if (target.Length == 0 || !GroupPath.IsSafeRelativePath(target))
+            {
+                _log.Warn($"分组路径不安全，跳过：{target}");
+                failed++;
+                continue;
+            }
+            if (string.Equals(curDir.Replace('\\', '/'), target, StringComparison.OrdinalIgnoreCase))
+            {
+                moved++;                                  // 已经在该位置（比如上次装过）
+                continue;
+            }
+
+            var result = _penumbra.SetPath(curDir, curName, target);
+            if (result == "Success")
+            {
+                moved++;
+                continue;
+            }
+
+            // 可能被 Penumbra 自己的「默认导入文件夹」刚挪走 → 按名字重新定位再试一次
+            var (dir2, name2) = ResolveMod(curName, job.Title);
+            if (!string.Equals(dir2, curDir, StringComparison.OrdinalIgnoreCase))
+            {
+                var retry = _penumbra.SetPath(dir2, name2, target);
+                if (retry == "Success")
+                {
+                    moved++;
+                    continue;
+                }
+                result = retry;
+            }
+
+            failed++;
+            _log.Warn($"归入文件夹失败（{curDir} → {target}）：{result}");
+        }
+
+        if (moved > 0)
+        {
+            job.Message += $"，已归入 {folder}/";
+            _log.Info($"已把 {moved} 个 Mod 归入 {folder}/（失败 {failed}）");
+        }
+        else if (failed > 0)
+        {
+            job.Message += $"（归入 {folder}/ 失败，仍在根目录）";
+        }
+    }
+
+    /// <summary>在 Penumbra 的 mod 列表里定位一个 Mod：先按目录名，再按路径尾段，最后按显示名。</summary>
+    private (string Dir, string Name) ResolveMod(string dirOrName, string title)
+    {
+        var mods = _penumbra.Mods();
+
+        if (mods.TryGetValue(dirOrName, out var byKey))
+            return (dirOrName, byKey);
+
+        foreach (var kv in mods)
+        {
+            if (kv.Key.EndsWith("/" + dirOrName, StringComparison.OrdinalIgnoreCase) ||
+                kv.Key.Equals(dirOrName, StringComparison.OrdinalIgnoreCase))
+                return (kv.Key, kv.Value);
+        }
+
+        if (title.Length > 0)
+        {
+            foreach (var kv in mods)
+                if (kv.Value.Equals(title, StringComparison.OrdinalIgnoreCase))
+                    return (kv.Key, kv.Value);
+        }
+
+        return (dirOrName, title);
+    }
 
     /// <summary>在 mod 根目录里找一个不冲突的目录名。</summary>
     private static string UniqueDirIn(string root, string safeName)
