@@ -19,10 +19,28 @@ public static class XmaUrls
     {
         var parts = new List<string>
         {
-            "nsfw=" + (q.Nsfw ? "true" : "false"),
             "sortby=" + q.SortBy,
             "sortorder=" + q.SortOrder,
         };
+
+        // NSFW 三态（**实测出来的语义**，别凭标签猜）：
+        //   不传 nsfw 参数 → 混合：NSFW 与 SFW 都返回      ← 「显示 NSFW」应该用这一态
+        //   nsfw=false     → 排除 NSFW
+        //   nsfw=true      → **只看 NSFW**（不是「显示」！早先按 bool 传给成了这个，等于只显示 NSFW）
+        // 实测方式：带登录态（浏览器通道）用具体 Mod 名搜 ——
+        //   不传参 → NSFW「Floor Forced Doggy」总数 1、SFW「Pictish Tattoos」总数 1
+        //   false  → NSFW 0、SFW 1      true → NSFW 1、SFW 0
+        switch (q.NsfwMode)
+        {
+            case 2:
+                parts.Add("nsfw=true");
+                break;
+            case 1:
+                break;                      // 混合：故意不传 nsfw 参数
+            default:
+                parts.Add("nsfw=false");
+                break;
+        }
 
         if (q.OnlyDtCompatible)
             parts.Add("dt_compat=1");
@@ -58,7 +76,15 @@ public sealed class SearchQuery
     public string Genders { get; set; } = string.Empty;
     public string Affects { get; set; } = string.Empty;
     public List<int>? Types { get; set; }
-    public bool Nsfw { get; set; }
+
+    /// <summary>
+    /// NSFW 三态（**站点语义是实测出来的**）：
+    /// 0 = 排除 NSFW（默认，URL 发 nsfw=false）；
+    /// 1 = 混合，NSFW 与 SFW 都显示（**URL 不传 nsfw 参数**——这才是「显示 NSFW」）；
+    /// 2 = 只看 NSFW（URL 发 nsfw=true）。
+    /// </summary>
+    public int NsfwMode { get; set; }
+
     public bool OnlyDtCompatible { get; set; } = true;
     public string SortBy { get; set; } = "time_published";
     public string SortOrder { get; set; } = "desc";

@@ -76,7 +76,7 @@ public class MainWindow : Window
     {
         _plugin = plugin;
         _form.OnlyDtCompatible = plugin.Configuration.OnlyDtCompatible;
-        _form.Nsfw = plugin.Configuration.ShowNsfw;
+        _form.NsfwMode = plugin.Configuration.EffectiveNsfwMode;
         SizeConstraints = new WindowSizeConstraints
         {
             MinimumSize = new Vector2(860, 560),
@@ -216,9 +216,13 @@ public class MainWindow : Window
         ImGui.Checkbox("仅当前版本兼容", ref _form.OnlyDtCompatible);
 
         ImGui.SameLine();
-        ImGui.Checkbox("显示 NSFW", ref _form.Nsfw);
+        DrawNsfwCombo("##nsfw-main");
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("NSFW 需要浏览器通道（借用本机浏览器的登录态），直连会被站点拒绝。");
+            ImGui.SetTooltip("站点是**三态**（实测）：\n" +
+                             "· 排除 NSFW ＝ 发 nsfw=false\n" +
+                             "· 含 NSFW（混合）＝ 不传 nsfw 参数（NSFW 与普通内容都返回）\n" +
+                             "· 只看 NSFW ＝ 发 nsfw=true\n" +
+                             "看/下载 NSFW 需要站点登录态，会走浏览器通道（借用本机浏览器的登录）。");
 
         ImGui.SameLine();
         ImGui.Checkbox("把关键词当标签搜", ref _form.KeywordAsTag);
@@ -257,9 +261,16 @@ public class MainWindow : Window
         ImGui.Spacing();
     }
 
-    /// <summary>
-    /// 页码控制条。单独一行，并在结果区底部再放一份（滚动到下面不用跑回顶部翻页）。
-    /// </summary>
+    /// <summary>NSFW 三态选择控件（主搜索栏与高级搜索弹窗共用）。</summary>
+    private void DrawNsfwCombo(string id)
+    {
+        ImGui.SetNextItemWidth(160);
+        ImGui.Combo($"内容##{id}", ref _form.NsfwMode, NsfwLabels, NsfwLabels.Length);
+    }
+
+    private static readonly string[] NsfwLabels = ["排除 NSFW", "含 NSFW（混合）", "只看 NSFW"];
+
+    /// <summary>页码控制条。单独一行，并在结果区底部再放一份（滚动到下面不用跑回顶部翻页）。</summary>
     private void DrawPager(string id)
     {
         var totalPages = _totalMods > 0 ? (_totalMods + SitePageSize - 1) / SitePageSize : 0;
@@ -1364,7 +1375,7 @@ public class MainWindow : Window
         ImGui.SameLine();
         ImGui.Checkbox("仅当前版本兼容", ref _form.OnlyDtCompatible);
         ImGui.SameLine();
-        ImGui.Checkbox("NSFW", ref _form.Nsfw);
+        DrawNsfwCombo("##nsfw-adv");
 
         ImGui.Separator();
 
@@ -1441,7 +1452,7 @@ public class MainWindow : Window
                 _plugin.Thumbs.Trim();
 
                 cfg.OnlyDtCompatible = _form.OnlyDtCompatible;
-                cfg.ShowNsfw = _form.Nsfw;
+                cfg.NsfwMode = _form.NsfwMode;
                 cfg.Save();
             }
             catch (XmaAccessException e)

@@ -29,7 +29,9 @@ public sealed class SearchForm
     public string Types = string.Empty;     // 类型 id，逗号分隔
     public int SortIndex;
     public bool OnlyDtCompatible = true;
-    public bool Nsfw;
+
+    /// <summary>NSFW 三态：0=排除（默认） 1=混合（都显示） 2=只看 NSFW。语义见 SearchQuery.NsfwMode。</summary>
+    public int NsfwMode;
 
     /// <summary>把「关键词」这一栏当标签精确检索。</summary>
     public bool KeywordAsTag;
@@ -40,7 +42,7 @@ public sealed class SearchForm
     {
         Page = page,
         OnlyDtCompatible = OnlyDtCompatible,
-        Nsfw = Nsfw,
+        NsfwMode = NsfwMode,
         SortBy = Sorts[Math.Clamp(SortIndex, 0, Sorts.Length - 1)].Value,
         SortOrder = "desc",
         Text = KeywordAsTag ? string.Empty : Trim(Text),
@@ -76,7 +78,7 @@ public sealed class SearchForm
         Text = Name = Author = Tags = Races = Genders = Affects = Types = string.Empty;
         SortIndex = 0;
         OnlyDtCompatible = true;
-        Nsfw = false;
+        NsfwMode = 0;
         KeywordAsTag = false;
     }
 

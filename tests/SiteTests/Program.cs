@@ -15,6 +15,7 @@ using XmaBrowser.Translate;
 //   联网：dotnet run -c Release -- live          （真站点：SFW 直连 + NSFW 浏览器通道 + 真实下载）
 var live = args.Contains("live");
 var translateOnly = args.Contains("translate");
+var nsfwProbe = args.Contains("nsfw");
 var pass = 0;
 var fail = 0;
 
@@ -34,8 +35,8 @@ Check("含 page=3", url.Contains("page=3"), url);
 Check("含 dt_compat=1", url.Contains("dt_compat=1"), url);
 Check("含 nsfw=false", url.Contains("nsfw=false"), url);
 Check("含 tags=bibo", url.Contains("tags=bibo"), url);
-var urlNsfw = XmaUrls.Search(new SearchQuery { Nsfw = true, OnlyDtCompatible = false });
-Check("NSFW + 不限兼容性时参数正确", urlNsfw.Contains("nsfw=true") && !urlNsfw.Contains("dt_compat"), urlNsfw);
+var urlNsfw = XmaUrls.Search(new SearchQuery { NsfwMode = 2, OnlyDtCompatible = false });
+Check("只看 NSFW + 不限兼容性时参数正确", urlNsfw.Contains("nsfw=true") && !urlNsfw.Contains("dt_compat"), urlNsfw);
 
 Console.WriteLine();
 Console.WriteLine("=== 2. 站点时间串两种形态 ===");
@@ -379,6 +380,23 @@ Check("读回校验：只是同名前缀（XMA2）→ 不通过",
 Check("读回校验：路径为空 → 不通过", !GroupPath.PathUnderFolder("", "XMA"));
 
 Console.WriteLine();
+Console.WriteLine("=== 13b. 站点 NSFW 三态 → URL 参数（实测语义）===");
+{
+    // 0=排除 → nsfw=false；1=混合 → 不传参数；2=只看 → nsfw=true
+    var q0 = XmaUrls.Search(new SearchQuery { NsfwMode = 0 });
+    var q1 = XmaUrls.Search(new SearchQuery { NsfwMode = 1 });
+    var q2 = XmaUrls.Search(new SearchQuery { NsfwMode = 2 });
+    Console.WriteLine("   排除: " + q0);
+    Console.WriteLine("   混合: " + q1);
+    Console.WriteLine("   只看: " + q2);
+    Check("排除 NSFW → 发 nsfw=false", q0.Contains("nsfw=false"));
+    Check("混合（显示 NSFW）→ **不传** nsfw 参数", !q1.Contains("nsfw="));
+    Check("只看 NSFW → 发 nsfw=true", q2.Contains("nsfw=true"));
+    Check("三态互不相同（不会又把「显示」当成「只看」）", q0 != q1 && q1 != q2 && q0 != q2);
+    Check("越界值按排除处理", XmaUrls.Search(new SearchQuery { NsfwMode = 99 }).Contains("nsfw=false"));
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 13. 翻译：分段逻辑（离线）===");
 {
     var para = string.Join("\n", Enumerable.Range(0, 40).Select(i => $"This is sentence number {i} of the description."));
@@ -511,6 +529,47 @@ if (live || translateOnly)
         catch (Exception e)
         {
             Console.WriteLine($"   [参考] 长文翻译未成功（公共接口限流）：{e.Message}");
+        }
+    }
+}
+
+if (nsfwProbe)
+{
+    // 用插件的浏览器通道（借用本机浏览器的登录态）实测 nsfw 参数的三种取值到底显示什么。
+    // 未登录时只能测出「true = 只看 NSFW；其他 = 排除 NSFW」，混合态必须带登录态测。
+    Console.WriteLine();
+    Console.WriteLine("=== NSFW 参数语义（带登录态，走浏览器通道）===");
+    var probeSettings = new TestSettings();
+    using var probeChannel = new BrowserChannel(probeSettings, new NullLog());
+
+    const string nsfwMod = "Floor Forced Doggy";
+    const string sfwMod = "Pictish Tattoos";
+    var cases = new (string Label, string Param)[]
+    {
+        ("不传 nsfw（默认）", null!),
+        ("nsfw=false      ", "false"),
+        ("nsfw=空          ", ""),
+        ("nsfw=true（只看 NSFW）", "true"),
+    };
+
+    foreach (var (label, param) in cases)
+    {
+        foreach (var (name, kind) in new[] { (nsfwMod, "NSFW"), (sfwMod, "SFW ") })
+        {
+            var q = param is null
+                ? $"https://www.xivmodarchive.com/search?sortby=&sortorder=&dt_compat=1&name={Uri.EscapeDataString(name)}"
+                : $"https://www.xivmodarchive.com/search?nsfw={param}&sortby=&sortorder=&dt_compat=1&name={Uri.EscapeDataString(name)}";
+            var html = await probeChannel.GetHtmlAsync(q, CancellationToken.None);
+            if (html is null || html.Length == 0)
+            {
+                Console.WriteLine($"   {label} | {kind} 「{name}」→ 取页面失败：{probeChannel.LastError}");
+                continue;
+            }
+
+            var parsed = XmaParser.ParseSearch(html, 1, q);
+            var found = parsed.Hits.Any(h => h.Title.Contains(name.Split(' ')[0], StringComparison.OrdinalIgnoreCase));
+            Console.WriteLine($"   {label} | {kind} 「{name}」→ 站点总数 {parsed.TotalMods}，本页 {parsed.Hits.Count} 条，" +
+                              $"找得到={found}");
         }
     }
 }

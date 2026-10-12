@@ -36,8 +36,18 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
     /// <summary>默认只看兼容当前版本的 Mod。</summary>
     public bool OnlyDtCompatible { get; set; } = true;
 
-    /// <summary>列表里是否显示 NSFW 条目（NSFW 需要浏览器通道，见下）。</summary>
-    public bool ShowNsfw { get; set; } = false;
+    /// <summary>
+    /// 旧字段，只用于迁移：以前是个 bool「显示 NSFW」，而它实际发的是 <c>nsfw=true</c>，
+    /// 站点语义是**只看 NSFW**（所以主人会说「显示 NSFW 不是只显示 NSFW」）。见 <see cref="NsfwMode"/>。
+    /// </summary>
+    public bool ShowNsfw { get; set; }
+
+    /// <summary>
+    /// 内容过滤三态（站点语义实测得出）：0 = 排除 NSFW（默认） 1 = 混合（NSFW 与 SFW 都显示）
+    /// 2 = 只看 NSFW。URL 映射：0 → <c>nsfw=false</c>，1 → **不传参数**，2 → <c>nsfw=true</c>。
+    /// -1 表示「还没从旧的 ShowNsfw 迁移过」。
+    /// </summary>
+    public int NsfwMode { get; set; } = -1;
 
     /// <summary>缩略图磁盘缓存上限（MB），超出按最久未用淘汰。</summary>
     public int ThumbCacheMb { get; set; } = 256;
@@ -163,6 +173,21 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
 
     /// <summary>下载完成/失败是否在聊天框提示。</summary>
     public bool NotifyInChat { get; set; } = true;
+
+    /// <summary>给三态值做个夹取（越界/未迁移都当 0）。</summary>
+    public int EffectiveNsfwMode => NsfwMode is 1 or 2 ? NsfwMode : 0;
+
+    /// <summary>
+    /// 老配置迁移：旧版「显示 NSFW」勾上时发的是 <c>nsfw=true</c>，站点语义是**只看 NSFW**；
+    /// 但主人勾它的本意是「把 NSFW 也显示出来」→ 迁到**混合**（1）。只跑一次。
+    /// </summary>
+    public bool Migrate()
+    {
+        if (NsfwMode >= 0) return false;
+        NsfwMode = ShowNsfw ? 1 : 0;
+        ShowNsfw = false;
+        return true;
+    }
 
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }

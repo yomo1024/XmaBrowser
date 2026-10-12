@@ -50,6 +50,7 @@ public sealed class Plugin : IDalamudPlugin
     public Plugin()
     {
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+        if (Configuration.Migrate()) Configuration.Save();   // 老的 bool「显示 NSFW」→ 三态
 
         _http = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
 
