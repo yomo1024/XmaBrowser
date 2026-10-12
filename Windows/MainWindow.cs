@@ -730,6 +730,22 @@ public class MainWindow : Window
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("对选中的 Mod 走一遍归组（会先读回真实路径核对）。\n" +
                                      "注意：手动归组没有站点类型，模板里的 {type} 会是 Other。");
+
+                ImGui.SameLine();
+                if (ImGui.Button("深入自检（试 8 种路径写法）"))
+                {
+                    var dir = _diagMods[_diagIndex].Key;
+                    var name = _diagMods[_diagIndex].Value;
+                    _diagReport = _plugin.Jobs.RunPathWriteExperiment(dir, name);
+                    _diagResult = "已跑完路径写法实验，见下方报告";
+                    _diagLines = _plugin.Penumbra.DumpPaths();
+                    foreach (var line in _diagReport.Split('\n'))
+                        Plugin.Log.Information("[XmaBrowser][深入自检] " + line.TrimEnd());
+                }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("在选中的 Mod 上依次试各种路径写法（改名 / 单段 / 正斜杠 / 反斜杠 / 全路径），\n" +
+                                     "每种都读回真实结果，最后尽量还原。\n" +
+                                     "用来判断「SetModPath 回 Success 却不动」到底是哪种写法才能生效。");
             }
         }
 

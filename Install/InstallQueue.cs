@@ -648,6 +648,84 @@ public sealed class InstallQueue : IDisposable
     private (string Dir, string Name) ResolveMod(string dirOrName, string title)
         => TryResolveMod(dirOrName, title, out var dir, out var name) ? (dir, name) : (dirOrName, title);
 
+    /// <summary>
+    /// 「深入自检」：在一个 Mod 上依次试 8 种路径写法，每种都读回真实结果。
+    ///
+    /// 为什么需要：`RenameAndMove` 有一条**合法但什么都不做**的分支
+    /// （`SuccessNothingDone` + `MoveChild` 里 `newParent == oldParent` 直接返回），
+    /// 此时 IPC 仍然回 `Success`。读源码推不出「目标文件夹为什么会被解析成当前父目录」，
+    /// 所以直接把各种写法在真机上跑一遍，看哪种真的生效。
+    ///
+    /// 注意：会在你选的这条 Mod 上改名/移动，最后**尽量还原**（名字改回原名、路径改回根）。
+    /// </summary>
+    public string RunPathWriteExperiment(string dirOrName, string displayName)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("=== 深入自检：路径写法实验 ===");
+        sb.AppendLine($"Penumbra API {_penumbra.ApiMajor}.{_penumbra.ApiMinor} | mod 根={_penumbra.ModDirectory}");
+        sb.AppendLine($"目标 Mod：{displayName}");
+
+        if (!TryResolveMod(dirOrName, displayName, out var dir, out var name))
+        {
+            sb.AppendLine("列表里找不到这条 Mod，实验中止。");
+            return sb.ToString();
+        }
+
+        var original = name;
+        sb.AppendLine($"当前：dir={dir} name={name}");
+        var start = _penumbra.GetPath(dir, name);
+        sb.AppendLine($"起始 ec={start.Ec} 路径=\"{start.Path}\" 自定义路径={start.CustomPath} 自定义名={start.CustomName}");
+        sb.AppendLine($"列表：{_penumbra.SnapshotList()}");
+        sb.AppendLine();
+
+        var variants = new (string Label, string Path)[]
+        {
+            ("① 只改名（不带斜杠）",                    original + "ZZ"),
+            ("② 改回原名",                              original),
+            ("③ 只给一个文件夹（正斜杠单段）",           "XMA"),
+            ("④ 只给一个文件夹（反斜杠单段）",           "XMA\\Gear"),
+            ("⑤ 嵌套文件夹（正斜杠）",                   "XMA/Gear"),
+            ("⑥ 全路径（正斜杠）",                       "XMA/Gear/" + original),
+            ("⑦ 全路径（反斜杠）",                       "XMA\\Gear\\" + original),
+            ("⑧ 还原：改回原名",                         original),
+        };
+
+        foreach (var (label, path) in variants)
+        {
+            if (!TryResolveMod(name, original, out var d2, out var n2))
+            {
+                sb.AppendLine($"{label}：**找不到 Mod 了**（可能上一步把它改得对不上了），中止");
+                break;
+            }
+
+            var ec = _penumbra.SetPath(d2, n2, path);
+            var after = _penumbra.GetPath(d2, n2);
+
+            // 名称变了要跟着更新定位用的名字
+            if (!string.Equals(after.Path, path, StringComparison.OrdinalIgnoreCase))
+            {
+                var relookup = _penumbra.GetPath(d2, n2);
+                if (relookup.Ec == "Success") { /* 保持 */ }
+            }
+
+            sb.AppendLine($"{label}");
+            sb.AppendLine($"    SetModPath(\"{path}\") → {ec}");
+            sb.AppendLine($"    读回 ec={after.Ec} 路径=\"{after.Path}\" 自定义路径={after.CustomPath} 自定义名={after.CustomName}");
+
+            var snapshot = _penumbra.SnapshotList();
+            var hit = snapshot.Split("; ").FirstOrDefault(x => x.Contains(path, StringComparison.OrdinalIgnoreCase));
+            sb.AppendLine($"    列表里是否出现该路径：{(hit is null ? "否" : "是 → " + hit)}");
+
+            // 定位用的名字跟着改（改名成功时）
+            if (after.Ec == "Success" && after.Path.Length > 0 && after.Path.IndexOf('/') < 0)
+                name = after.Path;
+        }
+
+        sb.AppendLine();
+        sb.AppendLine($"结束列表：{_penumbra.SnapshotList()}");
+        return sb.ToString();
+    }
+
     /// <summary>在 mod 根目录里找一个不冲突的目录名。</summary>
     private static string UniqueDirIn(string root, string safeName)
     {
