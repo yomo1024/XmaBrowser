@@ -65,7 +65,8 @@ public sealed class Plugin : IDalamudPlugin
                                 Configuration.ThumbCacheMb);
         Covers = new CoverFetcher(Site, Channel, logAdapter, Path.Combine(cacheDir, "covers"));
         Jobs = new InstallQueue(Site, Penumbra, Configuration, Channel, Covers, logAdapter,
-                                Path.Combine(cacheDir, "temp"));
+                                Path.Combine(cacheDir, "temp"),
+                                msg => ChatGui.Print(msg));
         CoverDrawer = new PenumbraCoverDrawer(PluginInterface, Configuration, Penumbra, TextureProvider, Log);
         CoverInjector.CleanupOld();     // 清掉上次注入留在 %TEMP% 的包
 

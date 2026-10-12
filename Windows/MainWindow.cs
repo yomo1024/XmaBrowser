@@ -752,6 +752,35 @@ public class MainWindow : Window
             ImGui.TextWrapped(_diagReport);
             ImGui.EndChild();
         }
+
+        // ---- 插件自己的诊断日志（主人找不到 dalamud.log，所以这里直接给）----
+        var diagLog = _plugin.Jobs.DiagLog;
+        ImGui.Spacing();
+        if (ImGui.Button("复制诊断日志"))
+            ImGui.SetClipboardText(string.Join("\n", diagLog));
+        ImGui.SameLine();
+        if (ImGui.Button("复制全部（报告+日志）"))
+            ImGui.SetClipboardText(_diagReport + "\n---- 日志 ----\n" + string.Join("\n", diagLog));
+        ImGui.SameLine();
+        ImGui.TextColored(Dim, $"诊断日志（最近 {diagLog.Count} 条；同样的内容也在 /xllog 里）");
+
+        ImGui.BeginChild("xma-diag-log", new Vector2(0, 150), true);
+        if (diagLog.Count == 0)
+        {
+            ImGui.TextColored(Dim, "（还没有记录。装一个 Mod、或点上面的「按模板归入分组」，这里就会写进来）");
+        }
+        else
+        {
+            foreach (var line in diagLog)
+                ImGui.TextUnformatted(line);
+
+            if (diagLog.Count != _diagLogSeen)
+            {
+                ImGui.SetScrollHereY(1f);
+                _diagLogSeen = diagLog.Count;
+            }
+        }
+        ImGui.EndChild();
     }
 
     // ==================================================================== 高级搜索
@@ -977,6 +1006,7 @@ public class MainWindow : Window
     private int _diagIndex;
     private string _diagResult = string.Empty;
     private string _diagReport = string.Empty;
+    private int _diagLogSeen;
 
     private static string Fmt(DateTime? t) => t?.ToString("yyyy-MM-dd HH:mm") ?? "-";
 

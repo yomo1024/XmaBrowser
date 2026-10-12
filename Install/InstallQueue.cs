@@ -71,10 +71,31 @@ public sealed class InstallQueue : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _worker;
 
+    /// <summary>给界面看/复制的诊断日志（最近若干条）。主人找不到 dalamud.log，所以自己留一份。</summary>
+    private readonly List<string> _diagLog = [];
+    private const int MaxDiagLog = 80;
+
+    /// <summary>播报关键结果（插件里接到游戏聊天框）。</summary>
+    private readonly Action<string>? _notify;
+
+    public IReadOnlyList<string> DiagLog
+    {
+        get { lock (_diagLog) return _diagLog.ToArray(); }
+    }
+
+    private void LogDiag(string line)
+    {
+        lock (_diagLog)
+        {
+            _diagLog.Add($"{DateTime.Now:HH:mm:ss}  {line}");
+            if (_diagLog.Count > MaxDiagLog) _diagLog.RemoveAt(0);
+        }
+    }
+
     public event Action? Changed;
 
     public InstallQueue(XmaClient site, PenumbraBridge penumbra, Configuration cfg, BrowserChannel channel,
-                        CoverFetcher covers, IXmaLog log, string workRoot)
+                        CoverFetcher covers, IXmaLog log, string workRoot, Action<string>? notify = null)
     {
         _site = site;
         _penumbra = penumbra;
@@ -83,6 +104,7 @@ public sealed class InstallQueue : IDisposable
         _covers = covers;
         _log = log;
         _workRoot = workRoot;
+        _notify = notify;
         Directory.CreateDirectory(_workRoot);
         _worker = Task.Run(LoopAsync);
     }
@@ -163,6 +185,8 @@ public sealed class InstallQueue : IDisposable
                 next.Error = $"{e.GetType().Name}: {e.Message}";
                 next.Message = "失败";
                 _log.Warn($"安装 {next.Title} 失败：{e}");
+                LogDiag($"{next.Title} 失败：{next.Error}");
+                _notify?.Invoke($"[XMA Browser] 安装失败：{next.Title} — {next.Error}");
             }
             finally
             {
@@ -213,6 +237,7 @@ public sealed class InstallQueue : IDisposable
             job.BrowserReason = XmaBlockClassifier.ShortLabel(e.Reason);
             job.Message = $"走浏览器通道下载（{job.BrowserReason}）…";
             _log.Info($"直连被拒 → 改用浏览器通道 [{job.BrowserReason}]：{e.Message}");
+            LogDiag($"直连被拒 → 浏览器通道（{job.BrowserReason}）");
             Changed?.Invoke();
             var ok = await _channel.DownloadAsync(job.Url, dest, Progress, ct).ConfigureAwait(false);
             if (!ok)
@@ -255,6 +280,7 @@ public sealed class InstallQueue : IDisposable
         job.Message = plan.Summary;
         Changed?.Invoke();
         _log.Info($"{job.Title}：{plan.Summary}");
+        LogDiag($"{job.Title}：{plan.Summary}");
 
         var packages = plan.Packages;
 
@@ -318,6 +344,8 @@ public sealed class InstallQueue : IDisposable
 
         if (newDirs.Count == 0)
             _log.Warn($"装完后没等出新 mod（{job.Title}）；Penumbra 可能仍在处理");
+
+        LogDiag($"装完：新目录 {newDirs.Count} 个{(newDirs.Count > 0 ? "（" + string.Join(",", newDirs) + "）" : "")}，登记目录 {addedNames.Count} 个");
 
         // 兜底：没等出新目录时（重装同一个 Mod、或 Penumbra 处理较慢），按显示名把已存在的那个找回来 ——
         // 否则归组会被整个跳过（实测：主人装了却没分组，就是这条路径断了）
@@ -425,6 +453,8 @@ public sealed class InstallQueue : IDisposable
             if (success) ok++;
             done++;
             _log.Info($"归组【{job.Title}】：{(success ? "成功" : "失败")} — {message}");
+            LogDiag($"归组【{job.Title}】{(success ? "成功" : "失败")}：{message}");
+            _notify?.Invoke($"[XMA Browser] 归组{(success ? "成功" : "失败")}：{job.Title} → {folder}/（{message}）");
 
             // 移完回头看两次：Penumbra 的导入/重扫可能在之后按旧路径把节点放回去
             ScheduleRecheck(dir, job.Title, folder, 5_000);
@@ -542,12 +572,16 @@ public sealed class InstallQueue : IDisposable
                 if (GroupPath.PathUnderFolder(path.Path, folder))
                 {
                     _log.Info($"[归组复核 {delayMs / 1000}s] 仍在 {folder}/（{path.Path}）");
+                    LogDiag($"复核 {delayMs / 1000}s：仍在 {folder}/ ✓");
                     return;
                 }
 
                 _log.Warn($"[归组复核 {delayMs / 1000}s] 位置已变回 \"{path.Path}\"（ec={path.Ec}）—— 重新归组一次");
+                LogDiag($"复核 {delayMs / 1000}s：位置被改回 \"{path.Path}\" → 重新归组");
                 var (ok, msg, _) = GroupOneDetailed(dirOrName, displayName, folder);
                 _log.Info($"[归组复核 {delayMs / 1000}s] 重试结果：{(ok ? "成功" : "失败")} — {msg}");
+                LogDiag($"复核 {delayMs / 1000}s 重试：{(ok ? "成功" : "失败")} — {msg}");
+                _notify?.Invoke($"[XMA Browser] 复核 {delayMs / 1000}s：{(ok ? "已重新归入" : "仍失败")} {folder}/ → {msg}");
             }
             catch (OperationCanceledException) { /* 卸载中 */ }
             catch (Exception e)
