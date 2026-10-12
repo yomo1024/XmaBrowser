@@ -75,6 +75,19 @@ def main() -> int:
     internal = manifest["InternalName"]
     version = manifest["AssemblyVersion"]
     ver3 = ".".join(version.split(".")[:3])
+
+    # 防呆：csproj 里改了版本却忘了重新编译时，打包会静默产出**旧版本**的包
+    # （还顺手把 pluginmaster.json 写成旧版本）。这里直接拦住。
+    csproj = os.path.join(ROOT, "%s.csproj" % internal)
+    if os.path.isfile(csproj):
+        with open(csproj, encoding="utf-8") as f:
+            text = f.read()
+        m = re.search(r"<Version>\s*([0-9][0-9.]*)\s*</Version>", text)
+        if m and m.group(1).rstrip(".") != ver3:
+            raise SystemExit(
+                "版本不一致：%s.csproj 写的是 %s，但已编译的清单是 %s。\n"
+                "→ 先 `dotnet build -c Release %s.csproj` 再打包。" % (internal, m.group(1), ver3, internal))
+
     zip_name = "%s-v%s.zip" % (internal, ver3)
 
     os.makedirs(out_dir, exist_ok=True)
