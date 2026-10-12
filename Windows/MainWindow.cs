@@ -686,6 +686,69 @@ public class MainWindow : Window
                              "详情描述：在右侧点「翻译标题+描述」，或开着自动翻译。");
     }
 
+    /// <summary>
+    /// **在插件里登录 XIVModArchive**（关于页 / 详情失败处的按钮触发）。
+    /// 会弹出一个看得见的浏览器窗口（插件自己的 profile），用户在里面过一次 Discord 授权。
+    /// </summary>
+    private void StartLogin()
+    {
+        if (_loginBusy) return;
+        _loginBusy = true;
+        _loginMessage = "正在准备…（会弹出一个浏览器窗口，请在里面完成 Discord 登录）";
+
+        var channel = _plugin.Channel;
+        Task.Run(async () =>
+        {
+            try
+            {
+                var outcome = await channel.LoginAsync(
+                    msg => _loginMessage = msg, CancellationToken.None).ConfigureAwait(false);
+                _loginMessage = outcome.Message;
+                _loginOk = outcome.Success;
+                foreach (var line in outcome.Message.Split('\n'))
+                    Plugin.Log.Information("[XmaBrowser][登录] " + line.TrimEnd());
+            }
+            catch (Exception e)
+            {
+                _loginMessage = $"登录失败：{e.GetType().Name} {e.Message}";
+                _loginOk = false;
+                Plugin.Log.Warning("[XmaBrowser][登录] " + _loginMessage);
+            }
+            finally
+            {
+                _loginBusy = false;
+            }
+        });
+    }
+
+    /// <summary>测试插件自带的登录态是否还有效（cookie 在 ≠ 站点还认）。</summary>
+    private void StartLoginCheck()
+    {
+        if (_loginBusy) return;
+        _loginBusy = true;
+        _loginMessage = "正在用插件自带的身份打开站点核对…（约 5 秒）";
+
+        var channel = _plugin.Channel;
+        Task.Run(async () =>
+        {
+            try
+            {
+                _loginMessage = await channel.CheckLoginAsync(CancellationToken.None).ConfigureAwait(false);
+                _loginOk = _loginMessage.StartsWith("已登录", StringComparison.Ordinal);
+                _ownedLoginCheckedUtc = DateTime.MinValue;
+            }
+            catch (Exception e)
+            {
+                _loginMessage = $"检查失败：{e.GetType().Name} {e.Message}";
+                _loginOk = false;
+            }
+            finally
+            {
+                _loginBusy = false;
+            }
+        });
+    }
+
     /// <summary>NSFW 通道 / 登录态自检（关于页按钮触发）。</summary>
     private void StartNsfwSelfCheck()
     {
@@ -995,7 +1058,26 @@ public class MainWindow : Window
         var d = _detail;
         if (d is null)
         {
-            ImGui.TextColored(Red, "详情读取失败，可以：换一条 / 开浏览器通道 / 稍后重试。");
+            ImGui.TextColored(Red, _error.Length > 0 ? _error : "详情读取失败。");
+            ImGui.Spacing();
+
+            // 读不到详情时，最可能的原因就是「需要登录态」—— 直接把登录入口放在这儿，
+            // 不要让人跑到「关于」页去猜。
+            if (_plugin.Channel.Enabled && !OwnedLoginCached())
+            {
+                ImGui.TextColored(Yellow, "这条内容可能需要登录态。在插件里登录一次，NSFW 的详情与下载就能看了：");
+                ImGui.BeginDisabled(_loginBusy);
+                if (ImGui.Button(_loginBusy ? "登录中…（请在弹出的浏览器窗口里完成 Discord 授权）"
+                                            : "登录 XIVModArchive"))
+                    StartLogin();
+                ImGui.EndDisabled();
+                if (_loginMessage.Length > 0)
+                    ImGui.TextColored(_loginOk ? Green : Dim, _loginMessage);
+            }
+            else
+            {
+                ImGui.TextColored(Dim, "可以：换一条 / 稍后重试 / 到「关于」页点「NSFW 通道自检」看具体原因。");
+            }
             return;
         }
 
@@ -1578,13 +1660,16 @@ public class MainWindow : Window
         ImGui.TextColored(Blue, "浏览器通道（NSFW / 被 Cloudflare 拦的内容）");
         ImGui.Separator();
         var chan = cfg.EnableBrowserChannel;
-        if (ImGui.Checkbox("启用浏览器通道（借用本机浏览器的登录态）", ref chan))
+        if (ImGui.Checkbox("启用浏览器通道（NSFW / 需登录的内容）", ref chan))
         {
             cfg.EnableBrowserChannel = chan;
             changed = true;
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("把本机已登录浏览器的 Cookies + Local State 复制到临时 profile，\n用同一个浏览器 exe 起无窗口实例，经 CDP 取页面/图片/文件。你不需要在插件里登录。");
+            ImGui.SetTooltip("需要登录态 / 被 Cloudflare 拦的内容交给浏览器去取。\n" +
+                             "身份来源优先级：① 你在插件里登录过的（关于页「登录 XIVModArchive」）" +
+                             "→ ② 本机已登录浏览器的 Cookies 副本。\n" +
+                             "推荐用 ①：一次登录长期有效，而且插件能明确告诉你登没登。（详见「关于」页）");
 
         var autoPick = cfg.AutoPickProfile;
         if (ImGui.Checkbox("自动挑选可用浏览器", ref autoPick)) { cfg.AutoPickProfile = autoPick; changed = true; }
@@ -1614,6 +1699,18 @@ public class MainWindow : Window
             cfg.BrowserExe = exe;
             changed = true;
         }
+
+        var profileDir = cfg.ChannelProfileDir;
+        ImGui.SetNextItemWidth(-1);
+        if (ImGui.InputTextWithHint("##ownprof", "插件自带的登录 profile 目录（留空 = 默认）", ref profileDir, 512))
+        {
+            cfg.ChannelProfileDir = profileDir;
+            changed = true;
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("插件自己的浏览器 profile：在「关于」页点「登录 XIVModArchive」时登录态就存在这里，\n" +
+                             "之后通道一直用它（这个目录**永不自动删除**）。\n" +
+                             $"默认：{BrowserChannel.DefaultOwnedProfileDir}");
 
         var timeout = cfg.BrowserTimeoutSec;
         ImGui.SetNextItemWidth(160);
@@ -1654,8 +1751,8 @@ public class MainWindow : Window
         ImGui.TextWrapped("在游戏里逛 XIVModArchive，点一下把 Mod 装进 Penumbra 并即时生效。");
         ImGui.Separator();
 
-        ImGui.TextColored(Dim, "公开内容直连站点；NSFW / 被 Cloudflare 拦的内容走浏览器通道（借用本机浏览器登录态）。");
-        ImGui.TextColored(Dim, "插件只读站点公开数据，不上传任何信息；临时 profile 默认用完即删。");
+        ImGui.TextColored(Dim, "公开内容直连站点；NSFW / 被 Cloudflare 拦的内容走浏览器通道。");
+        ImGui.TextColored(Dim, "插件只读站点公开数据，不上传任何信息；借来的临时 profile 默认用完即删，插件自带的登录 profile 只在你点「清除」时删除。");
         ImGui.Spacing();
 
         ImGui.TextUnformatted("仓库 / 更新源");
@@ -1777,6 +1874,49 @@ public class MainWindow : Window
             ImGui.TextWrapped(_diagReport);
             ImGui.EndChild();
         }
+
+        // ---- 站点登录（插件自己的浏览器 profile）----
+        // 站点对 NSFW 的门控是「客户端身份」，而登录只有 Discord OAuth 一条路（没有密码表单）。
+        // 原来只能复制本机浏览器的 cookies —— 借不到（没登录过 / cookie 锁着 / 过期了）就完全没辙，
+        // 而且插件无从知道到底借到了什么。现在插件自带一个 profile：在这里登录一次，长期复用。
+        ImGui.Spacing();
+        ImGui.TextColored(Blue, "站点登录（NSFW 内容需要）");
+        ImGui.Separator();
+
+        if (OwnedLoginCached())
+            ImGui.TextColored(Green, "✔ 插件里已有 XIVModArchive 登录态，NSFW 内容直接用这个身份");
+        else
+            ImGui.TextColored(Yellow, "✖ 插件里还没登录 —— NSFW 的详情与下载会取不到");
+
+        ImGui.BeginDisabled(_loginBusy);
+        if (ImGui.Button(_loginBusy ? "登录中…（请在浏览器窗口里完成 Discord 授权）"
+                                    : "登录 XIVModArchive（会弹出浏览器窗口）"))
+            StartLogin();
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("弹出的是**插件自己的**浏览器窗口，profile 存在插件目录里，不碰你平时用的浏览器。\n" +
+                             "在里面点「Log In with Discord」完成授权即可 —— 插件会自动检测到并关掉窗口。");
+        ImGui.SameLine();
+        ImGui.BeginDisabled(_loginBusy);
+        if (ImGui.Button("测试登录状态")) StartLoginCheck();
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("用插件自带的身份打开站点核对一次。\n" +
+                             "cookie 还在 ≠ 登录还有效（过期 / 被站点踢了 / Discord 撤销授权时，cookie 都还在），\n" +
+                             "所以要以站点给的页面为准。");
+        ImGui.SameLine();
+        if (ImGui.Button("清除插件里的登录"))
+        {
+            _loginMessage = _plugin.Channel.ClearLogin();
+            _loginOk = false;
+            _ownedLoginCheckedUtc = DateTime.MinValue;   // 强制重算
+        }
+        if (_loginMessage.Length > 0)
+        {
+            ImGui.Spacing();
+            ImGui.TextColored(_loginOk ? Green : Dim, _loginMessage);
+        }
+        ImGui.TextColored(Dim, "插件 profile：" + _plugin.Channel.OwnedProfileDir);
 
         // ---- NSFW 通道 / 站点登录态自检 ----
         // 站点只在**登录态**下才把 NSFW 并进「混合」列表（实测 直连 53281 / 登录态 61787 = 53281+8506），
@@ -2239,6 +2379,24 @@ public class MainWindow : Window
     // 详情短期缓存 + 「这条 mod 需要登录态」记忆（都是纯逻辑类，能离线自测）
     private readonly DetailCache _detailCache = new();
     private readonly NeedsLoginMemory _needsLogin = new();
+    // 在插件里登录 XIVModArchive
+    private bool _loginBusy;
+    private bool _loginOk;
+    private string _loginMessage = string.Empty;
+    // 「插件里有没有登录态」要扫 cookie 库，不能每帧扫 —— 缓存 2 秒
+    private bool _ownedLoginState;
+    private DateTime _ownedLoginCheckedUtc = DateTime.MinValue;
+
+    /// <summary>插件 profile 里有没有 XIVModArchive 登录态（结果缓存 2 秒，免得每帧都去扫 cookie 库）。</summary>
+    private bool OwnedLoginCached()
+    {
+        if ((DateTime.UtcNow - _ownedLoginCheckedUtc).TotalSeconds < 2) return _ownedLoginState;
+        _ownedLoginCheckedUtc = DateTime.UtcNow;
+        try { _ownedLoginState = _plugin.Channel.OwnedProfileHasXmaCookie; }
+        catch { _ownedLoginState = false; }
+        return _ownedLoginState;
+    }
+
     private string _viaChannelReason = string.Empty;
     private List<string> _diagLines = [];
     private List<KeyValuePair<string, string>> _diagMods = [];

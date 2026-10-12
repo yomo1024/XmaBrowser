@@ -28,6 +28,8 @@ public static class NsfwDiagnostics
         sb.AppendLine($"设置里的浏览器：{(string.IsNullOrWhiteSpace(cfg.BrowserExe) ? "（未指定，自动挑选）" : cfg.BrowserExe)}");
         sb.AppendLine($"用户数据目录　：{(string.IsNullOrWhiteSpace(cfg.BrowserUserDataDir) ? "（未指定，随浏览器自动推导）" : cfg.BrowserUserDataDir)}");
         sb.AppendLine($"自动挑 profile：{cfg.AutoPickProfile}");
+        sb.AppendLine($"插件自带 profile：{channel.OwnedProfileDir}");
+        sb.AppendLine($"  → 里面有没有 XIVModArchive 登录态？{(channel.OwnedProfileHasXmaCookie ? "**有**（通道会优先用它）" : "没有 —— 在「关于」页点「登录 XIVModArchive」即可")}");
         sb.AppendLine();
 
         sb.AppendLine("── 本机探测到的浏览器 ──");
@@ -88,11 +90,14 @@ public static class NsfwDiagnostics
 
         if (facts.State == XmaLoginState.LoggedOut)
         {
-            sb.AppendLine("结论：**通道借到的浏览器没有登录 XIVModArchive** → 混合模式只会拿到普通内容，NSFW 不显示。");
-            sb.AppendLine("要修：");
-            sb.AppendLine("  1) 用上面「站点 cookie：有」的那个浏览器打开 xivmodarchive.com 并登录（Discord 登录）；或");
-            sb.AppendLine("  2) 在「设置」里把「浏览器程序」指到那个浏览器、把「用户数据目录」指到它的 profile；");
-            sb.AppendLine("  3) 登录后点一次「测试」（重新自检）确认变成「已登录」。");
+            sb.AppendLine("结论：**通道用的身份没有登录 XIVModArchive** → 混合模式只会拿到普通内容，NSFW 不显示。");
+            sb.AppendLine("要修（首选，一次就好）：");
+            sb.AppendLine("  0) 在「关于」页点「登录 XIVModArchive」→ 在弹出的浏览器窗口里过一次 Discord 授权。");
+            sb.AppendLine("     登录态会存进插件自带的 profile，以后通道一直用它，不再依赖你平时用的浏览器。");
+            sb.AppendLine("  ── 或者：复用你已有浏览器的登录态 ──");
+            sb.AppendLine("  1) 用上面「站点 cookie：有」的那个浏览器打开 xivmodarchive.com 并登录；");
+            sb.AppendLine("  2) 或到「设置」把「浏览器程序 / 用户数据目录」指到那个浏览器；");
+            sb.AppendLine("  3) 再点一次本自检，确认变成「已登录」。");
             return sb.ToString();
         }
 

@@ -22,6 +22,7 @@ var nsfwProbe = args.Contains("nsfw");
 var nsfwDiag = args.Contains("nsfwdiag");
 var timingProbe = args.Contains("timing");
 var detailProbe = args.Contains("detailtime");
+var loginProbe = args.Contains("login");
 var oneCheck = args.Contains("one");
 var authorProbe = args.Contains("author");
 var pass = 0;
@@ -638,6 +639,56 @@ Console.WriteLine("=== 13i. 详情短期缓存 + 「需要登录态」记忆 ===
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 13j. 插件自带登录：探测判定 + profile 挑选顺序 ===");
+{
+    // 登录探测返回形如 "host|有退出链接|有登录链接"（判定标志与 LoginStateDetector 一致）
+    Check("已登录：站在 xivmodarchive + 有 /logout + 无登录链接 → 判定已登录",
+          BrowserChannel.ProbeSaysLoggedIn("www.xivmodarchive.com|1|0"));
+    Check("未登录：还有登录链接 → 不算已登录",
+          !BrowserChannel.ProbeSaysLoggedIn("www.xivmodarchive.com|0|1"));
+    Check("还在 Discord 授权页 → 不算已登录（关键：别把 Discord 的页面当成功）",
+          !BrowserChannel.ProbeSaysLoggedIn("discord.com|1|0"));
+    Check("空/畸形探测结果 → 不算已登录",
+          !BrowserChannel.ProbeSaysLoggedIn(null) && !BrowserChannel.ProbeSaysLoggedIn("") &&
+          !BrowserChannel.ProbeSaysLoggedIn("garbage") && !BrowserChannel.ProbeSaysLoggedIn("a|1"));
+    Check("能识别「当前停在 Discord 页」",
+          BrowserChannel.ProbeIsOnDiscord("discord.com|0|1") &&
+          !BrowserChannel.ProbeIsOnDiscord("www.xivmodarchive.com|1|0"));
+
+    // 挑 profile 的顺序：插件自带且已登录 > 借来的带 cookie > 其它
+    var ownedLogged = new BrowserCandidate { Label = "插件自带", Owned = true };
+    var borrowedCookie = new BrowserCandidate { Label = "Chrome" };
+    var borrowedBare = new BrowserCandidate { Label = "Edge" };
+    Func<BrowserCandidate, bool> hasCookie = c => c.Label is "插件自带" or "Chrome";
+
+    var ranked = BrowserChannel.RankCandidates([borrowedBare, borrowedCookie, ownedLogged], hasCookie);
+    Check("挑 profile：插件自带且已登录的排第一", ReferenceEquals(ranked[0], ownedLogged), ranked[0].Label);
+    Check("挑 profile：其次是有 cookie 的借来 profile", ReferenceEquals(ranked[1], borrowedCookie));
+    Check("挑 profile：没 cookie 的排最后", ReferenceEquals(ranked[2], borrowedBare));
+
+    // 插件自带但**没登录过** → 不该压过有 cookie 的借来 profile（否则等于自废武功）
+    var ownedBare = new BrowserCandidate { Label = "插件自带2", Owned = true };
+    var ranked2 = BrowserChannel.RankCandidates([ownedBare, borrowedCookie], hasCookie);
+    Check("挑 profile：自带的没登录时，仍优先用有 cookie 的", ReferenceEquals(ranked2[0], borrowedCookie),
+          ranked2[0].Label);
+
+    // 同级保持原顺序（OrderBy 是稳定排序，不能打乱探测顺序）
+    var a1 = new BrowserCandidate { Label = "A" };
+    var a2 = new BrowserCandidate { Label = "B" };
+    var ranked3 = BrowserChannel.RankCandidates([a1, a2], _ => false);
+    Check("挑 profile：条件相同时保持传入顺序", ReferenceEquals(ranked3[0], a1) && ReferenceEquals(ranked3[1], a2));
+
+    // 自带 profile 要「就地使用」，路径必须按 Chrome 的布局拼对
+    var oc = new BrowserCandidate { UserDataDir = @"C:\x\y", Owned = true };
+    Check("自带 profile 的 cookie 路径按 Chrome 布局拼",
+          oc.CookieFile.EndsWith(@"Default\Network\Cookies", StringComparison.Ordinal));
+    Check("Owned 默认 false（只有插件自带的才不复制、不删）", !new BrowserCandidate().Owned);
+    Check("没登录过的自带 profile 不算 usable（但 exe 在就还能取公开内容）",
+          !new BrowserCandidate { Exe = "x", UserDataDir = @"C:\nope" }.LooksUsable);
+    Check("登录页地址正确", XmaUrls.Login == "https://www.xivmodarchive.com/login");
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 13h. 挑战页/空页识别（浏览器通道取页面是否可用）===");
 {
     // 挑战页实测约 29KB —— 不能只按“小/空”判断，否则会把挑战页当成正常的“没有结果”。
@@ -1191,6 +1242,33 @@ if (detailProbe)
     }
 }
 
+if (loginProbe)
+{
+    // 在插件里登录：把整条链路真跑一遍（窗口会真的弹出来）。
+    // 无人操作时应当一路探测到超时/取消，然后**自己把浏览器优雅关掉**、不留垃圾进程。
+    Console.WriteLine();
+    Console.WriteLine("=== 18. 插件自带登录：真机跑一遍 ===");
+    var lSettings = new TestSettings();
+    using var lChannel = new BrowserChannel(lSettings, new TimeLog());
+
+    Console.WriteLine($"  插件 profile：{lChannel.OwnedProfileDir}");
+    Console.WriteLine($"  登录前：profile 里有 XMA cookie？{lChannel.OwnedProfileHasXmaCookie}");
+    Console.WriteLine($"  登录前：CheckLoginAsync → {await lChannel.CheckLoginAsync(CancellationToken.None)}");
+
+    Console.WriteLine("  启动登录流程（20 秒窗口，无人操作 → 应超时退出并自动关闭浏览器）…");
+    using var lcts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+    var lSw = System.Diagnostics.Stopwatch.StartNew();
+    var outcome = await lChannel.LoginAsync(msg => Console.WriteLine("        · " + msg), lcts.Token);
+    lSw.Stop();
+    Console.WriteLine($"  LoginAsync：{lSw.ElapsedMilliseconds} ms → 成功={outcome.Success}");
+    foreach (var line in outcome.Message.Split('\n')) Console.WriteLine("      " + line);
+    Console.WriteLine($"  用的浏览器：{outcome.BrowserLabel}");
+    Console.WriteLine($"  profile 目录已建立？{Directory.Exists(outcome.ProfileDir)}");
+    Console.WriteLine($"  登录后：profile 里有 XMA cookie？{lChannel.OwnedProfileHasXmaCookie}");
+    Console.WriteLine("  清除登录 → " + lChannel.ClearLogin());
+    Console.WriteLine($"  清除后目录还在？{Directory.Exists(outcome.ProfileDir)}（应为 False）");
+}
+
 Console.WriteLine();
 Console.WriteLine($"==== 结果：通过 {pass}，失败 {fail} ====");
 return fail == 0 ? 0 : 1;
@@ -1232,5 +1310,6 @@ internal sealed class TestSettings : IXmaSettings, IBrowserSettings
     public bool AutoPickProfile => true;
     public int BrowserTimeoutSec => 180;
     public bool CleanupBorrowedProfile => true;
+    public string ChannelProfileDir => string.Empty;
     public int ChannelIdleMinutes => 0;      // 测试里别自动关，避免影响多次连续调用
 }

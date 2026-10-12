@@ -162,8 +162,20 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
     /// <summary>单个 Mod 走浏览器通道的超时（秒）。</summary>
     public int BrowserTimeoutSec { get; set; } = 180;
 
-    /// <summary>用完是否删除临时 profile（里面含 cookie 副本，建议保持开启）。</summary>
+    /// <summary>用完是否删除临时 profile（里面含 cookie 副本，建议保持开启）。
+    /// 注意：这只对「借来的」profile 生效；插件自带的 profile（ChannelProfileDir）永不删除。</summary>
     public bool CleanupBorrowedProfile { get; set; } = true;
+
+    /// <summary>
+    /// **插件自带的浏览器 profile 目录**（空 = 放在插件配置目录下的 browser-profile）。
+    ///
+    /// 为什么要有它：原来只有一条路 —— 复制本机浏览器的 cookies 到临时 profile。
+    /// 那条路有三个说不清的地方：浏览器开着可能读到锁住的库、那个 profile 未必登录过
+    /// XIVModArchive、登录态过期了也无从察觉（站点只会回 403，看起来都一个样）。
+    /// 所以给插件自己一个 profile：用户在插件里点「登录」→ 弹出的浏览器窗口里过一次
+    /// Discord 授权 → 登录态就长期存在这里，之后通道一直用它。
+    /// </summary>
+    public string ChannelProfileDir { get; set; } = string.Empty;
 
     /// <summary>
     /// 浏览器通道空闲多少分钟后关掉那个 headless 浏览器（0 = 一直留着）。

@@ -14,6 +14,9 @@ public static class XmaUrls
 
     public static string ModPage(string modId) => $"{Root}/modid/{modId}";
 
+    /// <summary>登录页（点下去会 302 到 Discord 的授权页 —— 站点没有密码表单）。</summary>
+    public static string Login => $"{Root}/login";
+
     /// <summary>把搜索条件拼成站点 URL（参数名取自站点自己的表单，实测有效）。</summary>
     public static string Search(SearchQuery q)
     {

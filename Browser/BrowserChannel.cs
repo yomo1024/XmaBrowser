@@ -18,6 +18,11 @@ public sealed class BrowserCandidate
     public string Label { get; set; } = string.Empty;
     public string Exe { get; set; } = string.Empty;
     public string UserDataDir { get; set; } = string.Empty;
+
+    /// <summary>这个 profile 是**插件自己的**（用户在插件里登录过）。
+    /// 它就地使用：不复制 cookie、退出时不删（登录态要留着）。</summary>
+    public bool Owned { get; set; }
+
     public string CookieFile => Path.Combine(UserDataDir, "Default", "Network", "Cookies");
     public string LocalState => Path.Combine(UserDataDir, "Local State");
     public bool LooksUsable => Exe.Length > 0 && File.Exists(Exe) && File.Exists(CookieFile) && File.Exists(LocalState);
@@ -86,6 +91,245 @@ public sealed class BrowserChannel : IDisposable
 
     /// <summary>哪些候选浏览器里真的有 xivmodarchive 的登录态（用来优先挑）。</summary>
     public static List<BrowserCandidate> DetectUsable() => Detect().Where(c => c.LooksUsable).ToList();
+
+    // ==================================================================== 插件自带的登录
+
+    /// <summary>登录等待上限（分钟）：要到 Discord 那边输账号/过 2FA，给宽一点。</summary>
+    public const int LoginWaitMinutes = 5;
+
+    /// <summary>插件自带 profile 的默认位置（用户没自定义时用它）。</summary>
+    public static string DefaultOwnedProfileDir => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "XIVLauncher", "pluginConfigs", "XmaBrowser", "browser-profile");
+
+    /// <summary>插件自带 profile 的目录（跟着登录态一起长期留着）。</summary>
+    public string OwnedProfileDir =>
+        !string.IsNullOrWhiteSpace(_cfg.ChannelProfileDir) ? _cfg.ChannelProfileDir : DefaultOwnedProfileDir;
+
+    /// <summary>插件自带的 profile 里有没有 XIVModArchive 的 cookie（即「在插件里登录过」）。</summary>
+    public bool OwnedProfileHasXmaCookie
+        => BuildOwnedCandidate() is { } c && ProfileHasXmaCookie(c);
+
+    /// <summary>
+    /// 用本机任一可用浏览器的 exe + **插件自己的 profile 目录**拼一个候选。
+    /// 这是「在插件里登录」的基础：登录态存这里，之后通道一直用它，不再碰用户的浏览器 profile。
+    /// </summary>
+    public BrowserCandidate? BuildOwnedCandidate()
+    {
+        var all = Detect();
+        var exe = !string.IsNullOrWhiteSpace(_cfg.BrowserExe) && File.Exists(_cfg.BrowserExe)
+            ? _cfg.BrowserExe
+            : all.FirstOrDefault(c => File.Exists(c.Exe))?.Exe ?? string.Empty;
+        if (exe.Length == 0) return null;
+
+        var baseLabel = all.FirstOrDefault(c => string.Equals(c.Exe, exe, StringComparison.OrdinalIgnoreCase))?.Label
+                        ?? "自定义";
+        return new BrowserCandidate
+        {
+            Label = baseLabel + "·插件自带",
+            Exe = exe,
+            UserDataDir = OwnedProfileDir,
+            Owned = true,
+        };
+    }
+
+    /// <summary>
+    /// 挑 profile 的顺序（纯逻辑，可离线自测）：
+    ///   ① 插件自带的、且登录过 XIVModArchive 的 —— 最可靠，登录态是用户自己确认过的
+    ///   ② 借来的、带 XMA cookie 的 —— 老路子，能用但说不清登录态是否还有效
+    ///   ③ 其它
+    /// 同级之间保持传入顺序（OrderBy 是稳定排序），所以探测顺序不会被打乱。
+    /// </summary>
+    internal static List<BrowserCandidate> RankCandidates(IEnumerable<BrowserCandidate> all,
+                                                          Func<BrowserCandidate, bool> hasXmaCookie)
+        => all.OrderByDescending(c => c.Owned && hasXmaCookie(c))
+              .ThenByDescending(c => hasXmaCookie(c))
+              .ToList();
+
+    /// <summary>
+    /// 登录探测用的 JS：把「当前在哪个站 + 有没有退出链接 + 有没有登录链接」一次带回来。
+    /// 判定标志与 LoginStateDetector 一致（实测：已登录有 /logout；未登录有 Log In with Discord）。
+    /// 用 innerHTML 做正则而不是选选器，因为站点那段作者标签的 HTML 是畸形的。
+    /// </summary>
+    internal const string LoginProbeJs =
+        "(()=>{const h=location.host||'';const s=document.documentElement?document.documentElement.innerHTML:'';" +
+        "return h+'|'+(/\\/logout/.test(s)?1:0)+'|'+(/Log In with Discord|href=\"\\/login\"/.test(s)?1:0);})()";
+
+    /// <summary>探测结果说「确实登录上了」吗（纯函数，可离线自测）。</summary>
+    internal static bool ProbeSaysLoggedIn(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        var p = raw.Split('|');
+        if (p.Length < 3) return false;
+        if (!p[0].Contains("xivmodarchive", StringComparison.OrdinalIgnoreCase)) return false;   // 还在 Discord 那边就不算
+        return p[1] == "1" && p[2] == "0";
+    }
+
+    /// <summary>当前是不是停在 Discord 的授权页（给用户一句提示用）。</summary>
+    internal static bool ProbeIsOnDiscord(string? raw)
+        => !string.IsNullOrWhiteSpace(raw) && raw.Contains("discord", StringComparison.OrdinalIgnoreCase);
+
+    public sealed record LoginOutcome(bool Success, string Message, string BrowserLabel, string ProfileDir);
+
+    /// <summary>
+    /// **在插件里登录 XIVModArchive**。
+    ///
+    /// 为什么要有它：站点对 NSFW 的门控是「客户端身份」，而登录只有 Discord OAuth 一条路
+    /// （没有密码表单、没有 API key）。原来的做法是复制用户浏览器 profile 里的 cookie ——
+    /// 借得到就谢天谢地，借不到（没登录过 / cookie 锁着 / 过期了）插件也无从得知。
+    ///
+    /// 现在：开一个**看得见的**浏览器窗口，带着插件自己的 profile 打开站点的登录页，
+    /// 用户在里面过一次 Discord 授权，插件轮询页面直到检测到登录成功，然后优雅关闭浏览器
+    /// （必须是优雅关闭 —— 强杀进程可能让 Chrome 来不及把 cookie 落盘），登录态留在 profile 里长期复用。
+    /// </summary>
+    public async Task<LoginOutcome> LoginAsync(Action<string>? progress = null, CancellationToken ct = default,
+                                               int waitMinutes = LoginWaitMinutes)
+    {
+        var say = progress ?? (_ => { });
+
+        var browser = BuildOwnedCandidate();
+        if (browser is null)
+            return new LoginOutcome(false, "没找到可用的浏览器（本机需要有 Chrome / Edge / CentBrowser）", "", "");
+
+        var dir = OwnedProfileDir;
+        try { Directory.CreateDirectory(Path.Combine(dir, "Default", "Network")); }
+        catch (Exception e) { return new LoginOutcome(false, $"建不了 profile 目录：{e.Message}", browser.Label, dir); }
+
+        Session? session = null;
+        // 探测到的最后一帧页面状态：取消/超时时也要带出来，否则出问题没法自查
+        var lastRaw = string.Empty;
+        try
+        {
+            say($"[1/3] 正在启动浏览器（{browser.Label}）…");
+            session = await Session.StartAsync(browser, _cfg, _log, ct, headless: false,
+                                               startUrl: XmaUrls.Login).ConfigureAwait(false);
+            say("[2/3] 浏览器已打开 XIVModArchive 登录页：请在弹出的窗口里点「Log In with Discord」" +
+                $"并完成授权（最多等 {waitMinutes} 分钟）。");
+
+            var deadline = DateTime.UtcNow.AddMinutes(Math.Max(1, waitMinutes));
+            var toldDiscord = false;
+
+            while (DateTime.UtcNow < deadline)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var probe = await session.Cdp.SendAsync("Runtime.evaluate",
+                    new { expression = LoginProbeJs, returnByValue = true }, ct, 15_000).ConfigureAwait(false);
+                var raw = CdpClient.Value(probe) ?? string.Empty;
+                if (raw.Length > 0) lastRaw = raw;
+
+                if (ProbeSaysLoggedIn(raw))
+                {
+                    say("[3/3] 检测到已登录，正在把登录态写入插件 profile…");
+                    // 给站点和浏览器一点时间把 session cookie 落盘，再**优雅**关闭
+                    await Task.Delay(2000, ct).ConfigureAwait(false);
+                    await session.CloseGracefullyAsync().ConfigureAwait(false);
+                    session = null;
+                    DropSessionIfAny();
+                    _log.Info($"浏览器通道：插件登录成功，登录态已存到 {dir}");
+                    return new LoginOutcome(true,
+                        $"登录成功！登录态已存到插件自己的 profile，以后 NSFW 内容直接用这个身份。\n（{dir}）",
+                        browser.Label, dir);
+                }
+
+                if (!toldDiscord && ProbeIsOnDiscord(raw))
+                {
+                    toldDiscord = true;
+                    say("[2/3] 已经在 Discord 的授权页面了 —— 完成登录后这里会自动检测到，不用管我。");
+                }
+
+                await Task.Delay(1500, ct).ConfigureAwait(false);
+            }
+
+            return new LoginOutcome(false,
+                $"等了 {LoginWaitMinutes} 分钟还没检测到登录成功（当前页面状态：{lastRaw}）。\n" +
+                "可以再试一次，或在弹出的窗口里确认是不是把 Discord 授权走完了。",
+                browser.Label, dir);
+        }
+        catch (OperationCanceledException)
+        {
+            return new LoginOutcome(false,
+                $"登录已取消（最后一帧页面状态：{(lastRaw.Length > 0 ? lastRaw : "还没读到页面")}）",
+                browser.Label, dir);
+        }
+        catch (Exception e)
+        {
+            _log.Warn($"浏览器通道：登录流程出错 {e.GetType().Name} {e.Message}");
+            return new LoginOutcome(false, $"登录失败：{e.GetType().Name} {e.Message}", browser.Label, dir);
+        }
+        finally
+        {
+            if (session is not null)
+            {
+                try { await session.CloseGracefullyAsync().ConfigureAwait(false); } catch { /* 忽略 */ }
+                session.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 用**插件自带的 profile** 打开站点，看站点到底认不认这个身份。
+    ///
+    /// 为什么不能只看「cookie 库里有没有 xivmodarchive」：cookie 在 ≠ 会话还有效
+    /// （过期了、被站点踢了、Discord 那边撤销授权了，cookie 都还在）。
+    /// 真正的判据只有站点给的页面（有没有 /logout），这正是 LoginStateDetector 干的事。
+    ///
+    /// 它单起一个短命会话、用完就优雅关掉：共用主会话的话会跟别的通道操作抢 profile。
+    /// </summary>
+    public async Task<string> CheckLoginAsync(CancellationToken ct = default)
+    {
+        var owned = BuildOwnedCandidate();
+        if (owned is null) return "没找到可用的浏览器";
+        if (!File.Exists(owned.CookieFile)) return "未登录（插件 profile 里还没有站点 cookie）";
+
+        // 让开主会话：同一个 profile 不能被两个 Chrome 实例同时用
+        DropSessionIfAny();
+
+        Session? s = null;
+        try
+        {
+            s = await Session.StartAsync(owned, _cfg, _log, ct, headless: true).ConfigureAwait(false);
+            var html = await FetchHtmlCoreAsync(s, XmaUrls.Root, ct).ConfigureAwait(false);
+            if (html is null) return "取不到页面：" + _lastError;
+
+            var facts = LoginStateDetector.Analyze(html);
+            return facts.State switch
+            {
+                XmaLoginState.LoggedIn => "已登录（插件自带的身份有效）",
+                XmaLoginState.LoggedOut => "未登录（cookie 在，但站点不认这个会话了）",
+                XmaLoginState.CloudflareChallenge => "被 Cloudflare 挑战拦了 —— 这不是登录问题，稍后再试",
+                _ => "认不出来（页面里既没有 /logout 也没有登录链接）",
+            };
+        }
+        catch (OperationCanceledException) { return "检查被取消"; }
+        catch (Exception e) { return $"检查失败：{e.GetType().Name} {e.Message}"; }
+        finally
+        {
+            if (s is not null)
+            {
+                try { await s.CloseGracefullyAsync().ConfigureAwait(false); } catch { /* 忽略 */ }
+                s.Dispose();
+            }
+        }
+    }
+
+    /// <summary>清除插件里的登录（删掉自带 profile）。浏览器还开着的话要先关掉。</summary>
+    public string ClearLogin()
+    {
+        DropSessionIfAny();
+        var dir = OwnedProfileDir;
+        try
+        {
+            if (!Directory.Exists(dir)) return "插件里本来就没有登录态（profile 目录不存在）。";
+            Directory.Delete(dir, true);
+            _log.Info($"浏览器通道：已清除插件登录（删除 {dir}）");
+            return "已清除插件里的登录态。";
+        }
+        catch (Exception e)
+        {
+            return $"清除失败：{e.Message}（如果那个浏览器窗口还开着，先关掉它再试）";
+        }
+    }
 
     /// <summary>
     /// 按 URL 猜「页面可用的标志元素」：搜索页看有没有卡片、详情页看下载链/标题、其它看 body。
@@ -446,6 +690,8 @@ public sealed class BrowserChannel : IDisposable
     private BrowserCandidate? PickCandidate()
     {
         var all = Detect();
+
+        // ① 用户显式指定的浏览器 + profile（尊重设置，不动它）
         if (!string.IsNullOrWhiteSpace(_cfg.BrowserExe))
         {
             var custom = new BrowserCandidate
@@ -460,19 +706,26 @@ public sealed class BrowserChannel : IDisposable
             if (File.Exists(custom.Exe)) return custom;   // exe 在就用它（没有 cookie 也能取公开内容）
         }
 
-        var usable = all.Where(c => c.LooksUsable).ToList();
-        if (usable.Count > 0)
+        // ② 候选池 = 插件自带的 profile + 本机探测到的浏览器，按「谁最可能有登录态」排序：
+        //    插件自带的（用户亲手登录过）> 借来的带 XMA cookie 的 > 其它
+        var pool = new List<BrowserCandidate>();
+        if (BuildOwnedCandidate() is { } owned) pool.Add(owned);
+        pool.AddRange(all);
+
+        var ranked = RankCandidates(pool, ProfileHasXmaCookie);
+        var fresh = ranked.FirstOrDefault(c => c.LooksUsable || (c.Owned && File.Exists(c.Exe)));
+        if (fresh is not null)
         {
-            // 优先从「有 xivmodarchive cookie」的 profile 里挑（登录态在里面）
-            foreach (var c in usable)
-                if (ProfileHasXmaCookie(c)) { _log.Info($"浏览器通道使用 {c.Label}"); return c; }
-            _log.Info($"浏览器通道使用 {usable[0].Label}（未见 XMA cookie，NSFW 可能取不到）");
-            return usable[0];
+            if (fresh.Owned)
+                _log.Info($"浏览器通道使用插件自带的登录态（{fresh.UserDataDir}）");
+            else if (ProfileHasXmaCookie(fresh))
+                _log.Info($"浏览器通道使用 {fresh.Label}（借它的登录态）");
+            else
+                _log.Info($"浏览器通道使用 {fresh.Label}（未见 XMA cookie，NSFW 可能取不到）");
+            return fresh;
         }
 
-        if (!_cfg.AutoPickProfile)
-            return all.FirstOrDefault(c => File.Exists(c.Exe));
-
+        // ③ 实在没有能用的 profile：至少把 exe 找出来（只能取公开内容）
         return all.FirstOrDefault(c => File.Exists(c.Exe));
     }
 
@@ -546,34 +799,51 @@ public sealed class BrowserChannel : IDisposable
         }
 
         public static async Task<Session> StartAsync(BrowserCandidate browser, IBrowserSettings cfg, IXmaLog log,
-                                                     CancellationToken ct)
+                                                     CancellationToken ct, bool headless = true,
+                                                     string? startUrl = null)
         {
             var tempRoot = Path.Combine(Path.GetTempPath(), "XmaBrowser");
-            var profileDir = Path.Combine(tempRoot, "profile");
             var downloadDir = Path.Combine(tempRoot, "downloads");
-            SafeDelete(profileDir);
             SafeDelete(downloadDir);
-            Directory.CreateDirectory(Path.Combine(profileDir, "Default", "Network"));
             Directory.CreateDirectory(downloadDir);
 
-            // 借登录态：把 Cookies + Local State 复制过来（共享读，浏览器开着也能复制）
-            if (!CopyShared(browser.LocalState, Path.Combine(profileDir, "Local State")))
-                log.Warn("浏览器通道：Local State 复制失败");
-            if (!CopyShared(browser.CookieFile, Path.Combine(profileDir, "Default", "Network", "Cookies")))
-                log.Warn("浏览器通道：Cookies 复制失败（NSFW 可能取不到）");
+            string profileDir;
+            var cleanup = false;
+
+            if (browser.Owned)
+            {
+                // 插件自带的 profile：**就地使用**。
+                // 不复制 cookie（它自己就是登录态的存放处），退出时也不删 —— 删了就得重新登录。
+                profileDir = browser.UserDataDir;
+                Directory.CreateDirectory(Path.Combine(profileDir, "Default", "Network"));
+                log.Info($"浏览器通道：使用插件自带 profile（{profileDir}）");
+            }
+            else
+            {
+                profileDir = Path.Combine(tempRoot, "profile");
+                SafeDelete(profileDir);
+                Directory.CreateDirectory(Path.Combine(profileDir, "Default", "Network"));
+
+                // 借登录态：把 Cookies + Local State 复制过来（共享读，浏览器开着也能复制）
+                if (!CopyShared(browser.LocalState, Path.Combine(profileDir, "Local State")))
+                    log.Warn("浏览器通道：Local State 复制失败");
+                if (!CopyShared(browser.CookieFile, Path.Combine(profileDir, "Default", "Network", "Cookies")))
+                    log.Warn("浏览器通道：Cookies 复制失败（NSFW 可能取不到）");
+
+                cleanup = cfg.CleanupBorrowedProfile;
+            }
 
             var port = FreePort();
-            var args = new List<string>
-            {
-                "--headless=new",
-                "--disable-gpu",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-extensions",
-                $"--remote-debugging-port={port}",
-                $"--user-data-dir={profileDir}",
-                "about:blank",
-            };
+            var args = new List<string>();
+            if (headless) args.Add("--headless=new");
+            // 注意：登录窗口是**可见**的（headless 时下面这些参数照样无害）
+            args.Add("--disable-gpu");
+            args.Add("--no-first-run");
+            args.Add("--no-default-browser-check");
+            args.Add("--disable-extensions");
+            args.Add($"--remote-debugging-port={port}");
+            args.Add($"--user-data-dir={profileDir}");
+            args.Add(startUrl ?? "about:blank");
 
             var psi = new ProcessStartInfo(browser.Exe)
             {
@@ -585,7 +855,7 @@ public sealed class BrowserChannel : IDisposable
             foreach (var a in args) psi.ArgumentList.Add(a);
 
             var proc = Process.Start(psi) ?? throw new IOException("浏览器进程起不来");
-            log.Info($"浏览器通道启动 {browser.Label} headless（PID {proc.Id}，端口 {port}）");
+            log.Info($"浏览器通道启动 {browser.Label}{(headless ? " headless" : "（可见窗口）")}（PID {proc.Id}，端口 {port}）");
 
             var wsUrl = await WaitForCdpAsync(port, ct).ConfigureAwait(false);
             if (wsUrl is null)
@@ -595,7 +865,24 @@ public sealed class BrowserChannel : IDisposable
             }
 
             var cdp = await CdpClient.ConnectAsync(wsUrl, ct).ConfigureAwait(false);
-            return new Session(proc, cdp, profileDir, downloadDir, cfg.CleanupBorrowedProfile, log);
+            return new Session(proc, cdp, profileDir, downloadDir, cleanup, log);
+        }
+
+        /// <summary>
+        /// 优雅关闭：先发 Browser.close 让 Chrome 正常退出。
+        /// 为什么必须优雅 —— 登录流程结束后要保证 session cookie 真的落盘；
+        /// 直接 Kill 进程可能让它来不及写，结果就是「明明登录成功了，下次还是没登录态」。
+        /// </summary>
+        public async Task CloseGracefullyAsync()
+        {
+            try { await Cdp.SendAsync("Browser.close", null, CancellationToken.None, 5000).ConfigureAwait(false); }
+            catch { /* CDP 可能已经因为浏览器退出而断开，正常 */ }
+
+            for (var i = 0; i < 50; i++)
+            {
+                try { if (_process.HasExited) break; } catch { break; }
+                await Task.Delay(100).ConfigureAwait(false);
+            }
         }
 
         private static async Task<string?> WaitForCdpAsync(int port, CancellationToken ct)
