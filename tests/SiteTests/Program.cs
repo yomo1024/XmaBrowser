@@ -350,10 +350,19 @@ Console.WriteLine();
 Console.WriteLine("=== 12. 归组：候选路径形态 + 读回校验 ===");
 var cand = GroupPath.CandidatePaths("XMA/Gear", "MyModDir", "My Mod");
 Console.WriteLine("   候选：" + string.Join("  |  ", cand));
-Check("候选 1 = 文件夹+当前目录名（主假设）", cand.Contains("XMA/Gear/MyModDir"));
-Check("候选 2 = 只给文件夹", cand.Contains("XMA/Gear"));
-Check("候选 3 = 文件夹+显示名", cand.Contains("XMA/Gear/My Mod"));
+Check("候选 1 = 文件夹+当前目录名（主方案：只移动、不改名）", cand.Contains("XMA/Gear/MyModDir"));
+Check("候选 2 = 文件夹+显示名（节点名与显示名不一致时）", cand.Contains("XMA/Gear/My Mod"));
+Check("**不再**提供「只给文件夹」形态（那会把 Mod 改名成文件夹名）", !cand.Contains("XMA/Gear"));
 Check("候选不含不安全路径", cand.All(GroupPath.IsSafeRelativePath));
+Check("节点名 == 显示名时只给一条候选", GroupPath.CandidatePaths("XMA", "Same", "Same").Count == 1);
+
+// 末段就是「节点的新名字」：必须原样保留，否则会顺手把用户的 Mod 改名
+Check("完整路径保留原名原样（[ ] 等字符不动）",
+      GroupPath.BuildFullPath("XMA/Gear", "[Rini] Pooptober") == "XMA/Gear/[Rini] Pooptober",
+      GroupPath.BuildFullPath("XMA/Gear", "[Rini] Pooptober"));
+var longName = new string('x', 200);
+Check("超长名字不被截断（截断=悄悄改名）", GroupPath.BuildFullPath("XMA", longName) == "XMA/" + longName,
+      "长度 " + GroupPath.BuildFullPath("XMA", longName).Length);
 
 Check("读回校验：绝对路径含目标文件夹 → 通过",
       GroupPath.PathUnderFolder(@"F:\Penumbra\Mods\XMA\Gear\MyMod", "XMA/Gear"));

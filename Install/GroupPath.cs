@@ -56,10 +56,17 @@ public static class GroupPath
         return segments.Count == 0 ? string.Empty : string.Join("/", segments);
     }
 
-    /// <summary>拼出交给 SetModPath 的完整新路径（文件夹 + mod 自己的目录名）。</summary>
+    /// <summary>
+    /// 拼出交给 SetModPath 的完整新路径。
+    ///
+    /// ⚠ 末段必须是 Mod 的**原名（原样，不清洗、不截断、不改大小写）**：
+    /// 源码级证据（Luna `BaseFileSystem.CreateAllFoldersAndFile`）——路径按**最后一个 '/'** 切成两半，
+    /// 前面的部分是「要进/要建的文件夹」，**最后一段是节点的新名字**。
+    /// 所以这里若对名字做清洗/截断，会顺手把用户的 Mod **改名**（例如超长名被截到 48 字符）。
+    /// </summary>
     public static string BuildFullPath(string folder, string currentDirectoryName)
     {
-        var name = SanitizeSegment(currentDirectoryName);
+        var name = (currentDirectoryName ?? string.Empty).Trim();
         if (name.Length == 0) return string.Empty;
         return string.IsNullOrEmpty(folder) ? name : folder + "/" + name;
     }
@@ -111,11 +118,14 @@ public static class GroupPath
             : "（不分组，装在根目录下）";
 
     /// <summary>
-    /// `SetModPath` 的 newPath 到底该给哪种形态？
+    /// 算出交给 `SetModPath` 的候选 newPath。
     ///
-    /// 我们读不到 Penumbra 内部 `RenameAndMove` 的实现（`BaseFileSystem` 在外部依赖里），
-    /// 而它可能把 newPath 当成「含自身名的完整路径」，也可能只当「父文件夹」。所以不赌：
-    /// 给出几种候选，调用后用 `GetModPath` **读回真实路径**核对，挑对的那个。
+    /// 语义已经**从源码定死**（Luna `BaseFileSystem.CreateAllFoldersAndFile`）：
+    /// 路径按最后一个 '/' 切开 → 前半是文件夹、**后一段是节点的新名字**（没有 '/' 时整串都当名字、父目录=根）。
+    /// 所以这里只给「保持名字不变」的形态：
+    ///   1) 文件夹 + 当前节点名   ← 主方案（只移动，不改名）
+    ///   2) 文件夹 + 显示名       ← 仅当节点名与显示名不一致时补一条
+    /// **故意不再提供「只给文件夹」**：那会把 Mod 改名成最后一级文件夹名（例如 "Gear"）。
     /// </summary>
     public static IReadOnlyList<string> CandidatePaths(string folder, string currentNodeName, string displayName)
     {
@@ -127,13 +137,11 @@ public static class GroupPath
                 list.Add(s);
         }
 
-        // 1) 完整路径：文件夹 + 当前节点名（我们的主假设）
         Add(BuildFullPath(folder, currentNodeName));
-        // 2) 只给文件夹（若它自己保留节点名）
-        if (!string.IsNullOrEmpty(folder)) Add(folder);
-        // 3) 文件夹 + 显示名（若它用显示名当节点名）
-        var byDisplay = SanitizeSegment(displayName);
-        if (byDisplay.Length > 0) Add(string.IsNullOrEmpty(folder) ? byDisplay : folder + "/" + byDisplay);
+
+        var display = (displayName ?? string.Empty).Trim();
+        if (display.Length > 0 && !string.Equals(display, (currentNodeName ?? string.Empty).Trim(), StringComparison.Ordinal))
+            Add(BuildFullPath(folder, display));
 
         return list;
     }

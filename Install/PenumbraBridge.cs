@@ -170,9 +170,56 @@ public sealed class PenumbraBridge : IDisposable, Cover.CoverContext
     public string Add(string modDirectoryName)
         => OnFx("AddMod", () => _addMod.Invoke(modDirectoryName).ToString(), "Exception");
 
-    /// <summary>改 mod 的路径（可带文件夹）—— 内部是 Penumbra 的 RenameAndMove，折叠组靠它。</summary>
+    /// <summary>
+    /// 改 Mod 在 Penumbra 列表里的位置（虚拟路径）。
+    ///
+    /// ⚠⚠ 必须用**命名参数**！这是本项目踩过最贵的一个坑：
+    /// `Penumbra.Api.IpcSubscribers.SetModPath` 有一个便捷重载
+    ///     `Invoke(string modDirectory, string newPath, string modName = "")`
+    /// 它的形参顺序与基类 `FuncSubscriber&lt;string,string,string,int&gt;.Invoke`（线序 modDirectory, modName, newPath）
+    /// **不一样**，但类型完全相同（三个 string）→ 按位置传参会静默绑到便捷重载上，
+    /// 把「路径」塞进 modName、把「Mod 名」塞进 newPath。
+    /// 后果：`RenameAndMove(node, &lt;Mod 自己的名字&gt;)` 命中 `if (newPath == oldPath) return;`
+    /// → 永远返回 Success 却什么都不做（曾因此误判成「汉化版把接口改成了空壳」，白白绕了一大圈）。
+    /// 用命名参数可以把它钉死；将来官方若删掉/改名这个重载，编译会直接报错而不是静默传错。
+    /// </summary>
     public string SetPath(string modDirectory, string modName, string newPath)
-        => OnFx("SetModPath", () => _setModPath.Invoke(modDirectory, modName, newPath).ToString(), "Exception");
+        => OnFx("SetModPath",
+                () => _setModPath.Invoke(modDirectory: modDirectory, newPath: newPath, modName: modName).ToString(),
+                "Exception");
+
+    private bool? _argOrderOk;
+
+    /// <summary>
+    /// 自检 `SetModPath` 的参数顺序有没有传反（判据来自官方实现源码，且**无副作用**）：
+    ///   · 官方 `ModsApi.SetModPath` 第一步就是 `if (newPath.Length is 0) return InvalidArgument;`
+    ///     → 传「空路径」必须回 `InvalidArgument`
+    ///   · 再查 Mod 是否存在 → 传「不存在的 Mod」必须回 `ModMissing`
+    /// 若「空路径」那条回的是 `ModMissing`，说明路径那一位收到的其实是名字 → **参数传反了**。
+    /// 两条探针都用不存在的 Mod，所以不会创建/移动/删除任何东西。
+    /// </summary>
+    public (bool Ok, string Report) SelfTestSetPathArgOrder()
+    {
+        const string noDir = "__xma_selftest_no_such_dir__";
+        const string noName = "__xma_selftest_no_such_name__";
+
+        var emptyPath = SetPath(noDir, noName, string.Empty);
+        var badMod = SetPath(noDir, noName, "XMA/SelfTest");
+
+        var ok = emptyPath == "InvalidArgument" && badMod == "ModMissing";
+        _argOrderOk = ok;
+
+        var report = new System.Text.StringBuilder();
+        report.AppendLine($"空路径探针   → {emptyPath}（官方应为 InvalidArgument）");
+        report.AppendLine($"坏 Mod 探针  → {badMod}（官方应为 ModMissing）");
+        report.AppendLine(ok
+            ? "参数顺序自检：通过 ✓"
+            : "参数顺序自检：**未通过** ⚠ —— 路径与 Mod 名可能传反了，先别改路径，把这行发我。");
+        return (ok, report.ToString());
+    }
+
+    /// <summary>参数顺序是否已确认正确（未确认时先跑一次探针）。</summary>
+    public bool ArgOrderVerified => (_argOrderOk ??= SelfTestSetPathArgOrder().Ok) == true;
 
     /// <summary>读回 Mod 的**真实**路径（含文件夹）。改完必须读回来核对。</summary>
     public (string Ec, string Path, bool CustomPath, bool CustomName) GetPath(string modDirectory, string modName)

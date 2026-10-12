@@ -556,6 +556,17 @@ public sealed class InstallQueue : IDisposable
         // 在磁盘上建 XMA/Gear 这种空目录不但没用，还会被扫成一条空 mod、并在磁盘留下垃圾。
         // 归组一律只走 IPC SetModPath —— 绝不碰真实文件路径。
 
+        // 动路径之前先确认 IPC 参数顺序没传反（探针无副作用）。
+        // 传反的表现是「永远回 Success 但什么都不发生」，极难查 —— 见 PenumbraBridge.SetPath 的注释。
+        var argCheck = _penumbra.SelfTestSetPathArgOrder();
+        sb.AppendLine("参数顺序自检：" + (argCheck.Ok ? "通过 ✓" : "未通过 ⚠"));
+        if (!argCheck.Ok)
+        {
+            sb.AppendLine(argCheck.Report.TrimEnd());
+            FlagSetModPathNoOp("SetModPath 参数顺序自检未通过");
+            return (false, "SetModPath 参数顺序自检未通过，已放弃自动归组（请把自检报告发我）", sb.ToString());
+        }
+
         var (curDir, curName) = ResolveMod(dirOrName, displayName);
         sb.AppendLine($"定位到：dir={curDir} | name={curName}");
 
@@ -611,9 +622,12 @@ public sealed class InstallQueue : IDisposable
         sb.AppendLine($"列表快照（后）：{_penumbra.SnapshotList()}");
         sb.AppendLine("结果：失败 — " + last);
 
-        // 所有候选都回 Success 却毫无变化 → 判定为「SetModPath 假成功」（实机 8 种写法验证过）
+        // 所有候选都回 Success 却毫无变化 → 停用自动归组，别再白试。
+        // 注意：官方实现本身就会「回 Success 但什么都没做」——`ModsApi.SetModPath` 丢弃了
+        // `RenameAndMove` 的返回值，而 `RenameAndMove` 在 `newPath == 原路径` 时直接 return。
+        // 所以这**不能**证明接口被改过，只说明这条路没走通。
         if (succeededCalls > 0 && succeededCalls == candidates.Count)
-            FlagSetModPathNoOp("所有候选写法都回 Success 但路径不变");
+            FlagSetModPathNoOp("所有候选都回 Success 但路径不变（可能是参数顺序或本机实现差异）");
 
         return (false, last, sb.ToString());
     }
@@ -713,46 +727,27 @@ public sealed class InstallQueue : IDisposable
     public string RunPathWriteExperiment(string dirOrName, string displayName)
     {
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine("=== 深入自检：IPC 真伪探针 + 路径写法实验 ===");
+        sb.AppendLine("=== 归组自检：IPC 探针 + 移动/还原实测 ===");
         sb.AppendLine($"Penumbra API {_penumbra.ApiMajor}.{_penumbra.ApiMinor} | mod 根={_penumbra.ModDirectory}");
         sb.AppendLine($"目标 Mod：{displayName}");
         sb.AppendLine();
-        sb.AppendLine("【本自检的作用范围】只调用 Penumbra 的 IPC（SetModPath / ReloadMod / GetModPath），");
-        sb.AppendLine("  改的是 Penumbra 列表里的「虚拟位置」（即 sort_order.json 里的 Folder/SortOrderName），");
-        sb.AppendLine("  **不移动 / 不删除 / 不新建任何真实文件或文件夹**。下面的磁盘前后快照就是证据。");
+        sb.AppendLine("【作用范围】只调用 Penumbra 的 IPC（SetModPath / ReloadMod / GetModPath），");
+        sb.AppendLine("  改的只是列表里的折叠位置（Penumbra 把它存在 sort_order.json 的 Folder / SortOrderName），");
+        sb.AppendLine("  **不移动 / 不删除 / 不新建任何真实文件或文件夹**，并且结束前会把 Mod 放回原位。");
         var diskBefore = DiskSnapshotTop();
         sb.AppendLine($"磁盘快照（前）：{diskBefore}");
         sb.AppendLine();
 
-        // ---------- 探针：官方实现的第一步参数校验是已知的，用非法参数就能判定「背后是不是官方实现」----------
-        // 官方 ModsApi.SetModPath：newPath 为空 → InvalidArgument；找不到 Mod → ModMissing。
-        // 若这两个非法调用都回 Success，就说明这条标签后面不是官方实现（没注册 / 被换成空壳）。
-        sb.AppendLine("【探针 1】空路径：官方必须回 InvalidArgument");
-        var probe1 = _penumbra.SetPath("__xma_probe_no_such_dir__", "__xma_probe_no_such_name__", string.Empty);
-        sb.AppendLine($"    SetModPath(不存在的Mod, 空路径) → {probe1}");
-        sb.AppendLine($"    判定：{(probe1 == "InvalidArgument" ? "像官方实现" : "**不是官方实现**（官方这里必回 InvalidArgument）")}");
-
-        sb.AppendLine();
-        sb.AppendLine("【探针 2】不存在的 Mod：官方必须回 ModMissing");
-        var probe2 = _penumbra.SetPath("__xma_probe_no_such_dir__", "__xma_probe_no_such_name__", "XMA/Gear");
-        sb.AppendLine($"    SetModPath(不存在的Mod, XMA/Gear) → {probe2}");
-        sb.AppendLine($"    判定：{(probe2 == "ModMissing" ? "像官方实现" : "**不是官方实现**（官方这里必回 ModMissing）")}");
-
-        sb.AppendLine();
-        sb.AppendLine("【对照】ReloadMod 打同一个不存在的 Mod：官方必须回 ModMissing（用来区分「只有 SetModPath 坏」还是「整条 IPC 都坏」）");
-        var probe3 = _penumbra.Reload("__xma_probe_no_such_dir__", "__xma_probe_no_such_name__");
-        sb.AppendLine($"    ReloadMod(不存在的Mod) → {probe3}");
-        sb.AppendLine($"    判定：{(probe3 == "ModMissing" ? "ReloadMod 是官方实现（说明 IPC 通道整体正常）" : "ReloadMod 也不是官方实现")}");
-
-        var setPathFake = probe1 != "InvalidArgument" || probe2 != "ModMissing";
-        sb.AppendLine();
-        sb.AppendLine(setPathFake
-            ? "结论：SetModPath 这条标签后面**不是官方实现** → 本机版本无法通过 IPC 改路径。"
-            : "结论：SetModPath 像官方实现（那问题就在别处，需要继续查）。");
+        // ---------- 探针：参数顺序自检 ----------
+        // v0.4.0 的根因就出在这里（SetModPath 的便捷重载把 newPath 和 modName 换了位），
+        // 所以把「空路径必须回 InvalidArgument」做成常备探针，同类错误以后一眼就能抓住。
+        sb.AppendLine("【探针】SetModPath 参数顺序自检（无副作用：两条都用不存在的 Mod）");
+        var (argOk, argReport) = _penumbra.SelfTestSetPathArgOrder();
+        sb.AppendLine("    " + argReport.TrimEnd().Replace("\n", "\n    "));
         sb.AppendLine();
 
-        if (setPathFake)
-            FlagSetModPathNoOp($"探针判定非官方实现（空路径回 {probe1}，不存在的 Mod 回 {probe2}）");
+        if (!argOk)
+            FlagSetModPathNoOp("SetModPath 参数顺序自检未通过");
 
         if (!TryResolveMod(dirOrName, displayName, out var dir, out var name))
         {
@@ -763,57 +758,48 @@ public sealed class InstallQueue : IDisposable
         var original = name;
         sb.AppendLine($"当前：dir={dir} name={name}");
         var start = _penumbra.GetPath(dir, name);
-        sb.AppendLine($"起始 ec={start.Ec} 路径=\"{start.Path}\" 自定义路径={start.CustomPath} 自定义名={start.CustomName}");
+        sb.AppendLine($"起始读回：ec={start.Ec} 路径=\"{start.Path}\" 自定义路径={start.CustomPath} 自定义名={start.CustomName}");
         sb.AppendLine($"列表：{_penumbra.SnapshotList()}");
         sb.AppendLine();
 
-        var variants = new (string Label, string Path)[]
+        (string Ec, string Path, bool CustomPath, bool CustomName) ReadBack()
         {
-            ("① 只改名（不带斜杠）",                    original + "ZZ"),
-            ("② 改回原名",                              original),
-            ("③ 只给一个文件夹（正斜杠单段）",           "XMA"),
-            ("④ 只给一个文件夹（反斜杠单段）",           "XMA\\Gear"),
-            ("⑤ 嵌套文件夹（正斜杠）",                   "XMA/Gear"),
-            ("⑥ 全路径（正斜杠）",                       "XMA/Gear/" + original),
-            ("⑦ 全路径（反斜杠）",                       "XMA\\Gear\\" + original),
-            ("⑧ 还原：改回原名",                         original),
-        };
-
-        foreach (var (label, path) in variants)
-        {
-            if (!TryResolveMod(name, original, out var d2, out var n2))
-            {
-                sb.AppendLine($"{label}：**找不到 Mod 了**（可能上一步把它改得对不上了），中止");
-                break;
-            }
-
-            var ec = _penumbra.SetPath(d2, n2, path);
-            var after = _penumbra.GetPath(d2, n2);
-
-            // 变体①「只改名」如果能返回 Success 却连名字都不变 → 说明这个 SetModPath 是空壳
-            if (label.StartsWith("①") && ec == "Success" &&
-                string.Equals(after.Path, start.Path, StringComparison.OrdinalIgnoreCase) && !after.CustomName)
-                FlagSetModPathNoOp("连最简单的改名都没有生效");
-
-            // 名称变了要跟着更新定位用的名字
-            if (!string.Equals(after.Path, path, StringComparison.OrdinalIgnoreCase))
-            {
-                var relookup = _penumbra.GetPath(d2, n2);
-                if (relookup.Ec == "Success") { /* 保持 */ }
-            }
-
-            sb.AppendLine($"{label}");
-            sb.AppendLine($"    SetModPath(\"{path}\") → {ec}");
-            sb.AppendLine($"    读回 ec={after.Ec} 路径=\"{after.Path}\" 自定义路径={after.CustomPath} 自定义名={after.CustomName}");
-
-            var snapshot = _penumbra.SnapshotList();
-            var hit = snapshot.Split("; ").FirstOrDefault(x => x.Contains(path, StringComparison.OrdinalIgnoreCase));
-            sb.AppendLine($"    列表里是否出现该路径：{(hit is null ? "否" : "是 → " + hit)}");
-
-            // 定位用的名字跟着改（改名成功时）
-            if (after.Ec == "Success" && after.Path.Length > 0 && after.Path.IndexOf('/') < 0)
-                name = after.Path;
+            var (d, n) = ResolveMod(original, displayName);
+            return _penumbra.GetPath(d, n);
         }
+
+        // 用**平时真正会用的分组模板**算目标文件夹 —— 自检覆盖的就是线上那条路径。
+        var folder = GroupPath.BuildFolder(_cfg.GroupTemplate, _cfg.GroupPrefix, "Gear", "SelfTest", "0", original);
+        if (folder.Length == 0) folder = "XMA/SelfTest";
+        var target = GroupPath.BuildFullPath(folder, original);
+        sb.AppendLine($"目标文件夹：{folder}");
+        sb.AppendLine($"目标完整路径：{target}    <- 末段是原名，所以只移动、不改名");
+        sb.AppendLine();
+
+        sb.AppendLine("【实测 1】移入目标文件夹");
+        var ec1 = _penumbra.SetPath(dir, original, target);
+        var after1 = ReadBack();
+        sb.AppendLine($"    SetModPath(\"{target}\") → {ec1}");
+        sb.AppendLine($"    读回 ec={after1.Ec} 路径=\"{after1.Path}\" 自定义路径={after1.CustomPath} 自定义名={after1.CustomName}");
+        var moved = GroupPath.PathUnderFolder(after1.Path, folder);
+        sb.AppendLine($"    判定：{(moved ? "成功 ✓ 已归入 " + folder + "/" : "**未生效** —— 读回的路径没落在 " + folder + "/ 下面")}");
+
+        sb.AppendLine();
+        sb.AppendLine("【实测 2】还原到根目录（把 Mod 放回原位）");
+        var ec2 = _penumbra.SetPath(dir, original, original);
+        var after2 = ReadBack();
+        sb.AppendLine($"    SetModPath(\"{original}\") → {ec2}");
+        sb.AppendLine($"    读回 ec={after2.Ec} 路径=\"{after2.Path}\"");
+        var restored = after2.Path.Length > 0 && after2.Path.IndexOf('/') < 0;
+        sb.AppendLine($"    判定：{(restored ? "已回到根目录 ✓（" + after2.Path + "）" : "**没能还原**，请手动核对该 Mod 的位置：" + after2.Path)}");
+
+        sb.AppendLine();
+        sb.AppendLine(moved ? "结论：自动归组可用 ✓" : "结论：仍然没生效 —— 请把本报告整份发我。");
+        if (!moved)
+            FlagSetModPathNoOp("移动实测：SetModPath 回 Success 但读回路径未变");
+
+        sb.AppendLine();
+        sb.AppendLine($"（注：\"{folder}\" 这个折叠组会留在列表里，是空组，可在 Penumbra 里直接删掉）");
 
         sb.AppendLine();
         sb.AppendLine($"结束列表：{_penumbra.SnapshotList()}");

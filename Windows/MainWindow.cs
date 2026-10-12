@@ -763,7 +763,7 @@ public class MainWindow : Window
                                      "注意：手动归组没有站点类型，模板里的 {type} 会是 Other。");
 
                 ImGui.SameLine();
-                if (ImGui.Button("深入自检（试 8 种路径写法）"))
+                if (ImGui.Button("归组自检（IPC 探针 + 移动/还原实测）"))
                 {
                     var dir = _diagMods[_diagIndex].Key;
                     var name = _diagMods[_diagIndex].Value;
