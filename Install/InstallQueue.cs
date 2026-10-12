@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using XmaBrowser.Browser;
+using XmaBrowser.Cover;
 using XmaBrowser.Site;
 
 namespace XmaBrowser.Install;
@@ -29,6 +30,10 @@ public sealed class InstallJob
     public string Author { get; init; } = string.Empty;
     public string Url { get; set; } = string.Empty;
     public string FileName { get; set; } = string.Empty;
+    /// <summary>封面图地址（详情页大图优先，退回列表缩略图）。</summary>
+    public string CoverUrl { get; set; } = string.Empty;
+    /// <summary>封面本地路径（取到时填）。</summary>
+    public string CoverPath { get; set; } = string.Empty;
 
     public JobState State { get; set; } = JobState.Queued;
     public int Percent { get; set; }
@@ -53,6 +58,7 @@ public sealed class InstallQueue : IDisposable
     private readonly PenumbraBridge _penumbra;
     private readonly Configuration _cfg;
     private readonly BrowserChannel _channel;
+    private readonly CoverFetcher _covers;
     private readonly IXmaLog _log;
     private readonly string _workRoot;
 
@@ -64,12 +70,13 @@ public sealed class InstallQueue : IDisposable
     public event Action? Changed;
 
     public InstallQueue(XmaClient site, PenumbraBridge penumbra, Configuration cfg, BrowserChannel channel,
-                        IXmaLog log, string workRoot)
+                        CoverFetcher covers, IXmaLog log, string workRoot)
     {
         _site = site;
         _penumbra = penumbra;
         _cfg = cfg;
         _channel = channel;
+        _covers = covers;
         _log = log;
         _workRoot = workRoot;
         Directory.CreateDirectory(_workRoot);
@@ -81,7 +88,7 @@ public sealed class InstallQueue : IDisposable
         lock (_jobs) return _jobs.ToArray();
     }
 
-    public InstallJob Enqueue(ModDetail detail)
+    public InstallJob Enqueue(ModDetail detail, string coverUrl = "")
     {
         var job = new InstallJob
         {
@@ -89,6 +96,7 @@ public sealed class InstallQueue : IDisposable
             Title = detail.Title,
             Author = detail.Author,
             Url = detail.AbsoluteDownloadUrl,
+            CoverUrl = coverUrl.Length > 0 ? coverUrl : (detail.Images.Count > 0 ? detail.Images[0] : string.Empty),
             FileName = PackageResolver.SafeModDirName(detail.FileNameHint, $"mod-{detail.ModId}"),
             Message = "排队中…",
         };
@@ -203,6 +211,22 @@ public sealed class InstallQueue : IDisposable
         if (!File.Exists(dest) || new FileInfo(dest).Length == 0)
             throw new IOException("下载下来的文件是空的");
 
+        // ---------- 1.5) 取封面（要随包一起交给 Penumbra，所以必须在安装之前） ----------
+        if (_cfg.FetchCoverOnInstall && job.CoverUrl.Length > 0)
+        {
+            job.Message = "取封面…";
+            Changed?.Invoke();
+            try
+            {
+                var cover = await _covers.EnsureAsync(job.CoverUrl, job.ModId, ct).ConfigureAwait(false);
+                if (cover is not null) job.CoverPath = cover;
+            }
+            catch (Exception e)
+            {
+                _log.Warn($"封面获取失败（不影响安装）：{e.Message}");
+            }
+        }
+
         // ---------- 2) 解析成 Penumbra 能装的东西 ----------
         job.State = JobState.Extracting;
         job.Message = "解析包…";
@@ -259,8 +283,24 @@ public sealed class InstallQueue : IDisposable
 
         var before = _penumbra.Mods();
 
+        var covered = 0;
         foreach (var p in packages)
-            _penumbra.Install(p);
+        {
+            var toInstall = p;
+
+            // 封面塞进包再交给 Penumbra —— 这是让图真正落进 mod 目录的可靠做法
+            if (_cfg.UseCoverInPackage && job.CoverPath.Length > 0 && File.Exists(job.CoverPath))
+            {
+                var injected = CoverInjector.InjectIntoPackage(p, job.CoverPath, _workRoot);
+                if (injected is not null)
+                {
+                    toInstall = injected;
+                    covered++;
+                }
+            }
+
+            _penumbra.Install(toInstall);
+        }
 
         if (looseInstallName is not null)
             _penumbra.Add(looseInstallName);
@@ -278,6 +318,22 @@ public sealed class InstallQueue : IDisposable
 
         if (newDirs.Count == 0)
             _log.Warn($"装完后没等出新 mod（{job.Title}）；Penumbra 可能仍在处理");
+
+        // 封面兜底：包注入没成功（或包不是 zip）时，往 mod 目录补写 cover.<ext> / images/_MetaImage.<ext> / meta.json
+        if (job.CoverPath.Length > 0 && newDirs.Count > 0)
+        {
+            var modRoot = _penumbra.ModDirectory;
+            if (!string.IsNullOrEmpty(modRoot))
+            {
+                var applied = 0;
+                foreach (var dir in newDirs)
+                    if (CoverInjector.Apply(Path.Combine(modRoot, dir), job.CoverPath)) applied++;
+                if (applied > 0)
+                    _log.Info($"已为 {applied} 个 mod 目录补写封面");
+            }
+        }
+        if (covered > 0)
+            _log.Info($"封面已随包注入 {covered} 个包");
 
         // ---------- 4) 启用 + 重绘 ----------
         if (_cfg.EnableOnInstall && newDirs.Count > 0)

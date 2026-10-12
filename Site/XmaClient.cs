@@ -118,9 +118,10 @@ public sealed class XmaClient : IDisposable
         using var request = BuildRequest(url);
         using var response = await SendThrottledAsync(request, HttpCompletionOption.ResponseContentRead, ct)
             .ConfigureAwait(false);
-        ThrowIfBad(response, url);
         var bytes = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-        return System.Text.Encoding.UTF8.GetString(bytes);
+        var text = System.Text.Encoding.UTF8.GetString(bytes);
+        ThrowIfBad(response, url, text);
+        return text;
     }
 
     private HttpRequestMessage BuildRequest(string url)
@@ -156,18 +157,25 @@ public sealed class XmaClient : IDisposable
         }
     }
 
-    private static void ThrowIfBad(HttpResponseMessage response, string url)
+    private static void ThrowIfBad(HttpResponseMessage response, string url, string? body = null)
     {
         var code = (int)response.StatusCode;
         if (code is >= 200 and < 300) return;
 
         if (code == 403)
+        {
+            // Cloudflare 人机校验页（本机实测：请求打得太密时整站会这样返回，连公开内容也一样）
+            if (body is not null && body.Contains("Just a moment", StringComparison.OrdinalIgnoreCase))
+                throw new XmaAccessException(
+                    "站点正在做 Cloudflare 人机校验（Just a moment）—— 稍等一会儿再试，或启用浏览器通道交给浏览器取。");
+
             throw new XmaAccessException(
-                "站点返回 403：这条内容需要站点登录态（通常是 NSFW）。启用浏览器通道后再试。" );
+                "站点返回 403：这条内容需要站点登录态（通常是 NSFW）。启用浏览器通道后再试。");
+        }
 
         if (code == 404 && url.Contains("/private/", StringComparison.OrdinalIgnoreCase))
             throw new XmaAccessException(
-                "下载直链返回 404：这类文件要带登录态的浏览器去取（NSFW）。启用浏览器通道后再试。" );
+                "下载直链返回 404：这类文件要带登录态的浏览器去取（NSFW）。启用浏览器通道后再试。");
 
         throw new XmaHttpException(code, url, $"站点返回 HTTP {code}：{url}");
     }

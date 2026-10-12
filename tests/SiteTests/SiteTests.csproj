@@ -23,6 +23,9 @@
     <Compile Include="..\..\Site\XmaParser.cs" />
     <Compile Include="..\..\Site\XmaClient.cs" />
     <Compile Include="..\..\Install\PackageResolver.cs" />
+    <Compile Include="..\..\Cover\CoverContext.cs" />
+    <Compile Include="..\..\Cover\CoverLocator.cs" />
+    <Compile Include="..\..\Cover\CoverInjector.cs" />
     <Compile Include="..\..\Browser\IBrowserSettings.cs" />
     <Compile Include="..\..\Browser\CdpClient.cs" />
     <Compile Include="..\..\Browser\BrowserChannel.cs" />

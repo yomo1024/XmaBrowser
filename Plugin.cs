@@ -9,6 +9,7 @@ using Dalamud.Plugin.Services;
 using XmaBrowser.Site;
 using XmaBrowser.Install;
 using XmaBrowser.Browser;
+using XmaBrowser.Cover;
 using XmaBrowser.Ui;
 using XmaBrowser.Windows;
 
@@ -36,6 +37,8 @@ public sealed class Plugin : IDalamudPlugin
     public BrowserChannel Channel { get; }
     public InstallQueue Jobs { get; }
     public ThumbCache Thumbs { get; }
+    public CoverFetcher Covers { get; }
+    public PenumbraCoverDrawer CoverDrawer { get; }
     public HttpClient Http => _http;
 
     public readonly WindowSystem WindowSystem = new("XmaBrowser");
@@ -58,10 +61,13 @@ public sealed class Plugin : IDalamudPlugin
         var logAdapter = new DalamudLogAdapter(Log);
         Penumbra = new PenumbraBridge(PluginInterface, Framework, Log);
         Channel = new BrowserChannel(Configuration, logAdapter);
-        Jobs = new InstallQueue(Site, Penumbra, Configuration, Channel, logAdapter,
-                                Path.Combine(cacheDir, "temp"));
         Thumbs = new ThumbCache(_http, TextureProvider, Log, Path.Combine(cacheDir, "thumbs"),
                                 Configuration.ThumbCacheMb);
+        Covers = new CoverFetcher(Site, Channel, logAdapter, Path.Combine(cacheDir, "covers"));
+        Jobs = new InstallQueue(Site, Penumbra, Configuration, Channel, Covers, logAdapter,
+                                Path.Combine(cacheDir, "temp"));
+        CoverDrawer = new PenumbraCoverDrawer(PluginInterface, Configuration, Penumbra, TextureProvider, Log);
+        CoverInjector.CleanupOld();     // 清掉上次注入留在 %TEMP% 的包
 
         _window = new MainWindow(this);
         WindowSystem.AddWindow(_window);
@@ -93,6 +99,7 @@ public sealed class Plugin : IDalamudPlugin
         Site.Dispose();
         Jobs.Dispose();
         Thumbs.Dispose();
+        CoverDrawer.Dispose();
         Channel.Dispose();
         Penumbra.Dispose();
         _http.Dispose();

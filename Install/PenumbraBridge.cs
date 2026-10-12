@@ -12,7 +12,7 @@ namespace XmaBrowser.Install;
 /// Penumbra 的 IPC 封装（照搬同机已编译通过的 ModBridge 做法：类型化订阅器 + 全部切 framework 线程）。
 /// IPC 不是请求-应答式的：Penumbra 没装/没加载时会抛，这里统一吞掉并返回安全值。
 /// </summary>
-public sealed class PenumbraBridge : IDisposable
+public sealed class PenumbraBridge : IDisposable, Cover.CoverContext
 {
     private readonly IFramework _framework;
     private readonly IPluginLog _log;

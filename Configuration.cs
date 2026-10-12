@@ -41,6 +41,23 @@ public class Configuration : IPluginConfiguration, IXmaSettings, IBrowserSetting
     /// <summary>缩略图磁盘缓存上限（MB），超出按最久未用淘汰。</summary>
     public int ThumbCacheMb { get; set; } = 256;
 
+    // ---------------- 封面（Penumbra 面板里画图 + 随包交付）----------------
+
+    /// <summary>在 Penumbra 的 mod 面板里画自己装进去的封面。</summary>
+    public bool DrawCovers { get; set; } = true;
+
+    /// <summary>封面高度 = 面板宽度 × 这个比例（与 ModBridge / Heliosphere 的默认值一致）。</summary>
+    public float CoverSize { get; set; } = 0.375f;
+
+    /// <summary>
+    /// 把封面塞进包再交给 Penumbra（最可靠：Penumbra 只接受包文件，包内没图 = 装出来没图）。
+    /// 关掉则只在装完后往 mod 目录补写。
+    /// </summary>
+    public bool UseCoverInPackage { get; set; } = true;
+
+    /// <summary>安装时自动下载封面（优先详情页大图，退回列表缩略图）。</summary>
+    public bool FetchCoverOnInstall { get; set; } = true;
+
     /// <summary>列表里显示的最近搜索关键词（最多 10 个）。</summary>
     public System.Collections.Generic.List<string> RecentSearches { get; set; } = [];
 

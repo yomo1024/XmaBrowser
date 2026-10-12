@@ -159,6 +159,60 @@ public sealed class BrowserChannel : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// 让浏览器把图片取回来并**转成 JPEG**（canvas → dataURL）。
+    /// 这里刻意走「真实浏览器」：站点全尺寸图在 Cloudflare 后面，直连会 403；
+    /// 顺带把 WebP 之类统一成 JPEG —— Dalamud 的贴图加载不认 WebP。
+    /// </summary>
+    public async Task<byte[]?> GetImageBytesAsync(string url, CancellationToken ct = default)
+    {
+        var s = await GetSessionAsync(ct).ConfigureAwait(false);
+        if (s is null) return null;
+
+        await s.Cdp.SendAsync("Page.enable", null, ct).ConfigureAwait(false);
+        await s.Cdp.SendAsync("Page.navigate", new { url }, ct).ConfigureAwait(false);
+
+        // 等图片文档加载完（顶层是图片时，Chrome 会包一个 <img>）
+        for (var i = 0; i < 120; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var probe = await s.Cdp.SendAsync("Runtime.evaluate",
+                new { expression = "(()=>{const i=document.querySelector('img');return i&&i.complete&&i.naturalWidth>0?i.naturalWidth+'x'+i.naturalHeight:'';})()", returnByValue = true },
+                ct, 15_000).ConfigureAwait(false);
+            var v = CdpClient.Value(probe);
+            if (!string.IsNullOrEmpty(v)) break;
+            await Task.Delay(250, ct).ConfigureAwait(false);
+        }
+
+        var expr = "(function(){const i=document.querySelector('img');if(!i||!i.naturalWidth)return '';" +
+                   "const c=document.createElement('canvas');c.width=i.naturalWidth;c.height=i.naturalHeight;" +
+                   "c.getContext('2d').drawImage(i,0,0);return c.toDataURL('image/jpeg',0.92);})()";
+        var res = await s.Cdp.SendAsync("Runtime.evaluate",
+            new { expression = expr, returnByValue = true }, ct, 60_000).ConfigureAwait(false);
+        var dataUrl = CdpClient.Value(res);
+
+        if (dataUrl is null || !dataUrl.StartsWith("data:image", StringComparison.OrdinalIgnoreCase))
+        {
+            _lastError = "浏览器没能读出图片内容";
+            return null;
+        }
+
+        var idx = dataUrl.IndexOf("base64,", StringComparison.OrdinalIgnoreCase);
+        if (idx < 0) { _lastError = "图片数据格式异常"; return null; }
+
+        try
+        {
+            var bytes = Convert.FromBase64String(dataUrl[(idx + 7)..]);
+            _log.Info($"浏览器通道取图成功：{bytes.Length} 字节（已转 JPEG）");
+            return bytes;
+        }
+        catch (Exception e)
+        {
+            _lastError = "图片解码失败：" + e.Message;
+            return null;
+        }
+    }
+
     private async Task<Session?> GetSessionAsync(CancellationToken ct)
     {
         if (_session is { Alive: true }) return _session;

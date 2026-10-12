@@ -5,6 +5,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Threading.Tasks;
 using XmaBrowser.Browser;
+using XmaBrowser.Cover;
 using XmaBrowser.Install;
 using XmaBrowser.Site;
 
@@ -171,10 +172,80 @@ finally
     try { Directory.Delete(tmp, true); } catch { /* 忽略 */ }
 }
 
+Console.WriteLine();
+Console.WriteLine("=== 10. 封面：定位 / 注入包 / 真伪 WebP 判定 ===");
+var ctmp = Path.Combine(Path.GetTempPath(), "XmaBrowserCoverTests", Guid.NewGuid().ToString("n")[..8]);
+Directory.CreateDirectory(ctmp);
+try
+{
+    var jpg = Path.Combine(ctmp, "cover.jpg");
+    File.WriteAllBytes(jpg, [0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4]);
+
+    var modA = Path.Combine(ctmp, "modA");
+    Directory.CreateDirectory(modA);
+    File.WriteAllBytes(Path.Combine(modA, "cover.webp"),
+                       [0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
+    Check("真 WebP（RIFF…WEBP）判定为真", CoverLocator.IsRealWebp(Path.Combine(modA, "cover.webp")));
+    Check("只有 cover.webp 时不画（Dalamud 贴图不认 WebP）", CoverLocator.FindDrawable(modA) is null);
+    Check("已有真 WebP 封面 → 不去覆盖", CoverLocator.HasRealWebpCover(modA));
+
+    var modB = Path.Combine(ctmp, "modB");
+    Directory.CreateDirectory(modB);
+    File.WriteAllBytes(Path.Combine(modB, "cover.webp"), [0xFF, 0xD8, 0xFF, 0xE0]);   // jpg 改名成 webp 的假货
+    Check("假 WebP 不被当成真封面（否则后续修复会被 skip 死锁）", !CoverLocator.HasRealWebpCover(modB));
+    File.Copy(jpg, Path.Combine(modB, "cover.png"));
+    Check("cover.png 能被定位", CoverLocator.FindDrawable(modB)?.EndsWith("cover.png", StringComparison.OrdinalIgnoreCase) == true,
+          CoverLocator.FindDrawable(modB) ?? "null");
+
+    var modC = Path.Combine(ctmp, "modC");
+    Directory.CreateDirectory(Path.Combine(modC, "images"));
+    File.Copy(jpg, Path.Combine(modC, "images", "_MetaImage.jpg"));
+    Check("images/_MetaImage.jpg 能被定位",
+          CoverLocator.FindDrawable(modC)?.EndsWith("_MetaImage.jpg", StringComparison.OrdinalIgnoreCase) == true,
+          CoverLocator.FindDrawable(modC) ?? "null");
+
+    var modD = Path.Combine(ctmp, "modD");
+    Directory.CreateDirectory(Path.Combine(modD, "images"));
+    File.WriteAllText(Path.Combine(modD, "meta.json"), "{\"Image\":\"images\\\\_MetaImage.png\"}");
+    File.Copy(jpg, Path.Combine(modD, "images", "_MetaImage.png"));
+    Check("meta.json 里 Image 指的图能被定位", CoverLocator.FindDrawable(modD) is not null);
+
+    // 注入：包里已有 meta.json 与素材
+    var pkg = Path.Combine(ctmp, "MyMod.pmp");
+    using (var z = ZipFile.Open(pkg, ZipArchiveMode.Create))
+    {
+        WriteEntry(z, "meta.json", "{\"Name\":\"MyMod\",\"FileVersion\":3}");
+        WriteEntry(z, "default_mod.json", "{}");
+        WriteEntry(z, "textures/a.tex", "data");
+    }
+
+    var injected = CoverInjector.InjectIntoPackage(pkg, jpg, ctmp);
+    Check("注入产生了新包", injected is not null && File.Exists(injected), injected ?? "null");
+    if (injected is not null)
+    {
+        using var z = ZipFile.OpenRead(injected);
+        var names = z.Entries.Select(e => e.FullName.Replace('\\', '/')).ToList();
+        Check("新包含 cover.jpg", names.Contains("cover.jpg"), string.Join(",", names));
+        Check("新包含 images/_MetaImage.jpg", names.Contains("images/_MetaImage.jpg"), string.Join(",", names));
+        Check("原有文件一个不少", names.Contains("default_mod.json") && names.Contains("textures/a.tex"));
+        var meta = z.Entries.First(e => e.FullName == "meta.json");
+        using var sr = new StreamReader(meta.Open());
+        var text = sr.ReadToEnd();
+        Check("meta.json 的 Image 已指向新封面", text.Contains("_MetaImage.jpg"), text);
+        Check("meta.json 原有字段保留", text.Contains("MyMod"), text);
+    }
+
+    Check("没有封面图 → 不折腾，返回 null", CoverInjector.InjectIntoPackage(pkg, null, ctmp) is null);
+    Check("封面不是可解码格式 → 不注入", CoverInjector.InjectIntoPackage(pkg, Path.Combine(modA, "cover.webp"), ctmp) is null);
+}
+finally
+{
+    try { Directory.Delete(ctmp, true); } catch { /* 忽略 */ }
+}
+
 if (live)
 {
-    var cacheDir = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "live");
-    Directory.CreateDirectory(cacheDir);
+    var cacheDir = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "live");    Directory.CreateDirectory(cacheDir);
     var settings = new TestSettings();
     using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
     using var client = new XmaClient(http, settings, cacheDir, new NullLog());
