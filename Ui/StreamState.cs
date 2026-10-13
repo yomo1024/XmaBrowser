@@ -118,6 +118,25 @@ public sealed class StreamState
         return new AppendResult([], true, reason);
     }
 
+    /// <summary>
+    /// 把「已有 + 新增」拼成一个**新列表**返回，绝不原地改传进来的那个。
+    ///
+    /// ⚠ 这是为了防一个真实崩溃：渲染线程每帧都在 foreach 结果列表，
+    /// 而后台线程拿到新一页时会往里追加 —— 原地 AddRange 会抛
+    /// "Collection was modified; enumeration operation may not execute"。
+    /// 换成「另建一个新列表 + 整体换引用」（引用赋值是原子的，
+    /// 正在被枚举的旧列表完全不受影响），零锁、零中断。
+    /// </summary>
+    public static List<SearchHit> Merge(IReadOnlyList<SearchHit> existing, IReadOnlyList<SearchHit> added)
+    {
+        var merged = new List<SearchHit>((existing?.Count ?? 0) + (added?.Count ?? 0));
+        if (existing is not null)
+            foreach (var h in existing) merged.Add(h);
+        if (added is not null)
+            foreach (var h in added) merged.Add(h);
+        return merged;
+    }
+
     /// <summary>目前累计加载了多少条（界面显示用）。</summary>
     public string ProgressText => Total > 0 ? $"{Loaded} / {Total}" : Loaded.ToString();
 }

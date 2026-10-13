@@ -82,7 +82,7 @@ public class MainWindow : Window
     private string _authorFollowPending = string.Empty;
 
     /// <summary>这次搜索里属于「关注作者的新品」的 modId（用来在列表里打标）。</summary>
-    private readonly HashSet<string> _authorNewIds = [];
+    private HashSet<string> _authorNewIds = [];
 
     /// <summary>搜索结果短期缓存（翻页/重复搜秒开）。</summary>
     private readonly SearchCache _searchCache = new();
@@ -485,14 +485,15 @@ public class MainWindow : Window
 
         var authorName = _authorFollowPending;
         _authorFollowPending = string.Empty;
-        _authorNewIds.Clear();
+        // 同样别原地 Clear/Add：渲染线程在 Contains 它。换成新集合再整体换引用。
+        _authorNewIds = [];
 
         var cfg = _plugin.Configuration;
         var idx = FavoriteStore.IndexOfAuthor(cfg.FollowedAuthors, authorName);
         if (idx < 0) return;
 
         var fresh = FavoriteStore.DiffAndRemember(cfg.FollowedAuthors[idx], _hits.Select(h => h.ModId));
-        foreach (var id in fresh) _authorNewIds.Add(id);
+        _authorNewIds = new HashSet<string>(fresh, StringComparer.Ordinal);
         cfg.Save();
 
         _status += fresh.Count > 0
@@ -2085,18 +2086,26 @@ public class MainWindow : Window
             ImGui.SetTooltip("下载的安装包与解压目录：正常装完或失败都会立刻删；\n" +
                              "这条只兜底「插件崩在中间」这类残留。");
 
+        // 手动点「立即清理」时，扫盘与删除都放后台（不然点一下要等它扫完才响应）
         ImGui.Spacing();
         if (ImGui.Button("立即清理缓存")) MaintainCaches(force: true);
         ImGui.SameLine();
         if (ImGui.Button("打开缓存文件夹")) OpenFolder(_plugin.CacheDir);
         ImGui.SameLine();
-        ImGui.TextColored(Dim, "搜索完会顺手自动跑一次维护");
+        ImGui.TextColored(Dim, _cacheMaintaining ? "正在清理…" : "搜索完会顺手自动跑一次维护");
 
-        // 占用情况（每 3 秒重算一次，别每帧扫盘）
-        if ((DateTime.UtcNow - _cacheReportUtc).TotalSeconds > 3)
+        // 占用情况（每 3 秒算一次，且**在后台线程扫盘** —— 缓存目录可能有上千个文件，
+        // 递归扫盘放在渲染线程上会直接掉帧）
+        if (!_cacheReportBusy && (DateTime.UtcNow - _cacheReportUtc).TotalSeconds > 3)
         {
             _cacheReportUtc = DateTime.UtcNow;
-            _cacheReport = BuildCacheReport();
+            _cacheReportBusy = true;
+            _ = Task.Run(() =>
+            {
+                try { _cacheReport = BuildCacheReport(); }
+                catch { /* 忽略：显示不了占用不影响功能 */ }
+                finally { _cacheReportBusy = false; }
+            });
         }
         if (_cacheReport.Length > 0)
         {
@@ -2119,37 +2128,49 @@ public class MainWindow : Window
     /// </summary>
     private void MaintainCaches(bool force = false)
     {
+        if (_cacheMaintaining) return;
         if (!force && (DateTime.UtcNow - _lastCacheMaintainUtc).TotalMinutes < 5) return;
         _lastCacheMaintainUtc = DateTime.UtcNow;
+        _cacheMaintaining = true;
 
+        // ⭐ 整块搬到后台线程：这是**递归扫盘 + 删文件 + 写日志文件**，
+        // 放在渲染线程上点一下「立即清理」就会先卡住界面。
         var cfg = _plugin.Configuration;
-        string report;
-        try
+        var dirs = new List<(string Name, string Path, long LimitBytes)>
         {
-            report = CacheMaintenance.Maintain(
-            [
-                ("预览图", _plugin.ThumbsDir, Math.Max(16, cfg.ThumbCacheMb) * 1048576L),
-                ("封面图", _plugin.CoversDir, Math.Max(8, cfg.CoverCacheMb) * 1048576L),
-                ("翻译缓存", _plugin.TranslateDir, Math.Max(8, cfg.TranslateCacheMb) * 1048576L),
-            ],
-            _plugin.TempDir, TimeSpan.FromHours(Math.Max(1, cfg.TempLeftoverHours)), DateTime.UtcNow);
-        }
-        catch (Exception e)
-        {
-            report = $"维护出错：{e.GetType().Name}";
-        }
+            ("预览图", _plugin.ThumbsDir, Math.Max(16, cfg.ThumbCacheMb) * 1048576L),
+            ("封面图", _plugin.CoversDir, Math.Max(8, cfg.CoverCacheMb) * 1048576L),
+            ("翻译缓存", _plugin.TranslateDir, Math.Max(8, cfg.TranslateCacheMb) * 1048576L),
+        };
+        var tempDir = _plugin.TempDir;
+        var age = TimeSpan.FromHours(Math.Max(1, cfg.TempLeftoverHours));
+        var jobs = _plugin.Jobs;
 
-        if (report != "缓存都在上限内，没动")
+        _ = Task.Run(() =>
         {
-            _plugin.Jobs.Note("缓存维护：" + report);
-            _cacheMessage = $"{DateTime.Now:HH:mm:ss} {report}";
-        }
-        else if (force)
-        {
-            _cacheMessage = $"{DateTime.Now:HH:mm:ss} 缓存都在上限内，没动";
-        }
-
-        _cacheReportUtc = DateTime.MinValue;   // 让占用显示马上刷新
+            try
+            {
+                var report = CacheMaintenance.Maintain(dirs, tempDir, age, DateTime.UtcNow);
+                if (report != "缓存都在上限内，没动")
+                {
+                    jobs.Note("缓存维护：" + report);
+                    _cacheMessage = $"{DateTime.Now:HH:mm:ss} {report}";
+                }
+                else if (force)
+                {
+                    _cacheMessage = $"{DateTime.Now:HH:mm:ss} 缓存都在上限内，没动";
+                }
+                _cacheReportUtc = DateTime.MinValue;   // 让占用显示马上刷新
+            }
+            catch (Exception e)
+            {
+                _cacheMessage = $"缓存维护出错：{e.GetType().Name}";
+            }
+            finally
+            {
+                _cacheMaintaining = false;
+            }
+        });
     }
 
     /// <summary>各缓存目录的占用与上限（给设置页显示 —— 别让用户去猜占了多少）。</summary>
@@ -2222,18 +2243,40 @@ public class MainWindow : Window
                               "Set Default Import Folder，之后新装的 Mod 会被 Penumbra 自己放进那个文件夹；" +
                               "或右键某条 Mod → Move Mod，手动把它的路径写成 XMA/Gear/名字。");
         }
+        ImGui.BeginDisabled(_diagBusy);
         if (ImGui.Button("读取所有 Mod 的真实路径（并写日志）"))
         {
-            _diagMods = _plugin.Penumbra.Mods().ToList();
-            _diagLines = _plugin.Penumbra.DumpPaths();
-            foreach (var line in _diagLines)
-                Plugin.Log.Information("[XmaBrowser][诊断] " + line);
-            _diagResult = $"读到 {_diagLines.Count} 条（已写入日志）";
-            _diagIndex = 0;
+            // ⚠ Penumbra 的 IPC 会一直等到框架线程回话。原来这是在渲染线程上直接调的 ——
+            // 点一下就会冻住界面（Mod 多的时候尤其明显）。现在整块丢后台。
+            _diagBusy = true;
+            _diagResult = "读取中…（Penumbra IPC 可能要几秒）";
+            var pen = _plugin.Penumbra;
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    var mods = pen.Mods().ToList();
+                    var lines = pen.DumpPaths();
+                    foreach (var line in lines)
+                        Plugin.Log.Information("[XmaBrowser][诊断] " + line);
+                    // 整体换引用：渲染线程可能正在遍历它们，别原地改
+                    _diagMods = mods;
+                    _diagLines = lines;
+                    _diagIndex = 0;
+                    _diagResult = $"读到 {lines.Count} 条（已写入日志）";
+                }
+                catch (Exception e)
+                {
+                    _diagResult = $"❌ 读取失败：{e.GetType().Name} {e.Message}";
+                }
+                finally { _diagBusy = false; }
+            });
         }
+        ImGui.EndDisabled();
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("用 Penumbra 的 GetModPath 读回每个 Mod 的真实路径（含文件夹），\n" +
-                             "并写入 /xllog —— 分组没生效时看这个最直接。");
+                             "并写入 /xllog —— 分组没生效时看这个最直接。\n" +
+                             "（读取在后台线程跑，界面不会卡）");
 
         if (_diagLines.Count > 0)
         {
@@ -2249,36 +2292,79 @@ public class MainWindow : Window
                 ImGui.SetNextItemWidth(420);
                 ImGui.Combo("##xma-diag-pick", ref _diagIndex, labels, labels.Length);
                 ImGui.SameLine();
+
+                var pick = Math.Clamp(_diagIndex, 0, _diagMods.Count - 1);
+                var selDir = _diagMods[pick].Key;
+                var selName = _diagMods[pick].Value;
+
+                ImGui.BeginDisabled(_diagBusy);
                 if (ImGui.Button("按模板归入分组"))
                 {
-                    var cfg = _plugin.Configuration;
-                    var dir = _diagMods[_diagIndex].Key;
-                    var name = _diagMods[_diagIndex].Value;
+                    _diagBusy = true;
+                    _diagResult = "归组中…";
+                    var cfg2 = _plugin.Configuration;
                     // 手动归组时没有站点类型信息（只有安装时才带）→ {type} 会算成 Other
-                    var folder = GroupPath.BuildFolder(cfg.GroupTemplate, cfg.GroupPrefix, string.Empty, string.Empty,
-                                                       string.Empty, name);
-                    var (ok, msg, report) = _plugin.Jobs.GroupOneDetailed(dir, name, folder);
-                    _diagResult = (ok ? "✅ " : "❌ ") + msg;
-                    _diagReport = report;
-                    _diagLines = _plugin.Penumbra.DumpPaths();
-                    foreach (var line in _diagLines)
-                        Plugin.Log.Information("[XmaBrowser][诊断] " + line);
+                    var folder = GroupPath.BuildFolder(cfg2.GroupTemplate, cfg2.GroupPrefix, string.Empty,
+                                                       string.Empty, string.Empty, selName);
+                    var jobs = _plugin.Jobs;
+                    var pen2 = _plugin.Penumbra;
+                    var d = selDir;
+                    var n = selName;
+                    _ = Task.Run(() =>
+                    {
+                        try
+                        {
+                            var (ok, msg, report) = jobs.GroupOneDetailed(d, n, folder);
+                            var lines = pen2.DumpPaths();
+                            foreach (var line in lines)
+                                Plugin.Log.Information("[XmaBrowser][诊断] " + line);
+                            _diagReport = report;
+                            _diagLines = lines;      // 整体换引用
+                            _diagResult = (ok ? "✅ " : "❌ ") + msg;
+                        }
+                        catch (Exception e)
+                        {
+                            _diagResult = $"❌ {e.GetType().Name}: {e.Message}";
+                        }
+                        finally { _diagBusy = false; }
+                    });
                 }
+                ImGui.EndDisabled();
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("对选中的 Mod 走一遍归组（会先读回真实路径核对）。\n" +
-                                     "注意：手动归组没有站点类型，模板里的 {type} 会是 Other。");
+                                     "注意：手动归组没有站点类型，模板里的 {type} 会是 Other。\n" +
+                                     "（归组在后台线程跑，界面不会卡）");
 
                 ImGui.SameLine();
+                ImGui.BeginDisabled(_diagBusy);
                 if (ImGui.Button("归组自检（IPC 探针 + 移动/还原实测）"))
                 {
-                    var dir = _diagMods[_diagIndex].Key;
-                    var name = _diagMods[_diagIndex].Value;
-                    _diagReport = _plugin.Jobs.RunPathWriteExperiment(dir, name);
-                    _diagResult = "已跑完路径写法实验，见下方报告";
-                    _diagLines = _plugin.Penumbra.DumpPaths();
-                    foreach (var line in _diagReport.Split('\n'))
-                        Plugin.Log.Information("[XmaBrowser][深入自检] " + line.TrimEnd());
+                    _diagBusy = true;
+                    _diagResult = "自检中…（要试多种路径写法，可能十几秒）";
+                    var jobs2 = _plugin.Jobs;
+                    var pen3 = _plugin.Penumbra;
+                    var d2 = selDir;
+                    var n2 = selName;
+                    _ = Task.Run(() =>
+                    {
+                        try
+                        {
+                            var rep = jobs2.RunPathWriteExperiment(d2, n2);
+                            var lines = pen3.DumpPaths();
+                            foreach (var line in rep.Split('\n'))
+                                Plugin.Log.Information("[XmaBrowser][深入自检] " + line.TrimEnd());
+                            _diagReport = rep;
+                            _diagLines = lines;      // 整体换引用
+                            _diagResult = "已跑完路径写法实验，见下方报告";
+                        }
+                        catch (Exception e)
+                        {
+                            _diagResult = $"❌ {e.GetType().Name}: {e.Message}";
+                        }
+                        finally { _diagBusy = false; }
+                    });
                 }
+                ImGui.EndDisabled();
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("在选中的 Mod 上依次试各种路径写法（改名 / 单段 / 正斜杠 / 反斜杠 / 全路径），\n" +
                                      "每种都读回真实结果，最后尽量还原。\n" +
@@ -2524,7 +2610,15 @@ public class MainWindow : Window
     private void ApplyAppend(SearchResult result, int page, bool fromCache)
     {
         var res = _stream.Append(result.Hits, result.TotalMods);
-        if (res.NewItems.Count > 0) _hits.AddRange(res.NewItems);
+        if (res.NewItems.Count > 0)
+        {
+            // ⚠ 绝不能 _hits.AddRange(...)：这个赋值发生在**后台线程**，
+            // 而渲染线程每帧都在 foreach 同一个 List —— 原地改会抛
+            // "Collection was modified; enumeration operation may not execute"（真会崩）。
+            // 换成「另建新列表 + 整体换引用」：引用赋值是原子的，正在被枚举的旧列表不受影响。
+            var old = _hits;
+            _hits = StreamState.Merge(old, res.NewItems);
+        }
         if (result.TotalMods > 0) _totalMods = result.TotalMods;
         _status = $"已加载 {_hits.Count} 条 / 站点共 {_totalMods} 条" +
                   (fromCache ? "（缓存，秒开）" : string.Empty);
@@ -2985,16 +3079,31 @@ public class MainWindow : Window
     private DateTime _cacheReportUtc = DateTime.MinValue;
     private string _cacheReport = string.Empty;
     private string _cacheMessage = string.Empty;
+    // 后台任务在途标志：扫盘/读 cookie 库/读 Penumbra 这类同步 IO 绝不能放在渲染线程上
+    private volatile bool _cacheReportBusy;
+    private volatile bool _ownedLoginBusy;
+    private volatile bool _diagBusy;
+    private volatile bool _cacheMaintaining;
     // 外链判定只往诊断日志写一次（不然每帧都写会刷屏）
     private string _loggedExternalMod = string.Empty;
 
-    /// <summary>插件 profile 里有没有 XIVModArchive 登录态（结果缓存 2 秒，免得每帧都去扫 cookie 库）。</summary>
+    /// <summary>插件 profile 里有没有 XIVModArchive 登录态（结果缓存 2 秒；**扫描放后台线程**）。</summary>
     private bool OwnedLoginCached()
     {
-        if ((DateTime.UtcNow - _ownedLoginCheckedUtc).TotalSeconds < 2) return _ownedLoginState;
-        _ownedLoginCheckedUtc = DateTime.UtcNow;
-        try { _ownedLoginState = _plugin.Channel.OwnedProfileHasXmaCookie; }
-        catch { _ownedLoginState = false; }
+        // ⚠ 这个检查要打开 cookie 库文件扫最多 1 MB。原来每 2 秒在渲染线程上做一次 ——
+        // 属于「每两秒一次的小卡顿」，现在改成后台扫描、界面只读结果。
+        if (!_ownedLoginBusy && (DateTime.UtcNow - _ownedLoginCheckedUtc).TotalSeconds >= 2)
+        {
+            _ownedLoginCheckedUtc = DateTime.UtcNow;
+            _ownedLoginBusy = true;
+            var ch = _plugin.Channel;
+            _ = Task.Run(() =>
+            {
+                try { _ownedLoginState = ch.OwnedProfileHasXmaCookie; }
+                catch { _ownedLoginState = false; }
+                finally { _ownedLoginBusy = false; }
+            });
+        }
         return _ownedLoginState;
     }
 

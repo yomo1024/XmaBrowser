@@ -1071,6 +1071,36 @@ Console.WriteLine("=== 13p. 流式加载状态机（去重 / 到底判据 / 别�
     Check("到底后再 Reset 可以重新开始（新搜索别被上一次的『到底』锁住）", wasEnd && !again.End);
 
     Check("进度文案：知道总数时显示 x / y", new StreamState().ProgressText.Length > 0);
+
+    // ⭐ 并发安全的不变量：追加必须**换新列表**，不能原地改正在被枚举的那个。
+    // （渲染线程每帧 foreach 结果列表，后台线程原地 AddRange 会抛
+    //  "Collection was modified; enumeration operation may not execute"）
+    var liveHits = new List<SearchHit> { H("a"), H("b") };
+    var merged = StreamState.Merge(liveHits, [H("c")]);
+    Check("Merge 返回的是新实例（不是原列表）", !ReferenceEquals(liveHits, merged));
+    Check("Merge 不动原列表（正在被枚举的列表必须保持完整）", liveHits.Count == 2);
+    Check("Merge 结果顺序：已有在前、新增在后",
+          merged.Count == 3 && merged[0].ModId == "a" && merged[2].ModId == "c",
+          string.Join(",", merged.Select(h => h.ModId)));
+
+    // 边枚举边合并也不能炸（模拟渲染线程正在 foreach）
+    var enumerating = new List<SearchHit> { H("1"), H("2") };
+    var okEnum = true;
+    try
+    {
+        foreach (var _ in enumerating)
+        {
+            // 后台线程在这一帧里合并出新列表并换引用 —— 不影响当前这次枚举
+            enumerating = StreamState.Merge(enumerating, [H("3")]);
+        }
+    }
+    catch { okEnum = false; }
+    Check("枚举过程中换新引用不会抛「集合已修改」", okEnum && enumerating.Count > 2,
+          enumerating.Count.ToString());
+
+    // 边界：空输入
+    Check("Merge 空 + 空 = 空列表", StreamState.Merge([], []).Count == 0);
+    Check("Merge 空 + 有 = 有", StreamState.Merge([], [H("x")]).Count == 1);
 }
 
 Console.WriteLine();
