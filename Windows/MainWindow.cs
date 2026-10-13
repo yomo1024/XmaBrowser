@@ -1149,6 +1149,20 @@ public class MainWindow : Window
 
         ImGui.TextColored(Dim, $"作者 {d.Author}　类型 {d.Type}　站点 id {d.ModId}");
         ImGui.TextColored(Dim, $"最后更新 {Fmt(d.LastUpdateLocal)}　发布 {Fmt(d.ReleaseLocal)}");
+
+        // 原页面链接：**所有 mod 都有**（站点 URL 可以直接拼出来，不依赖抓取、不会缺）。
+        // 用途：分享给别人、或者你在浏览器里已登录时自己下载（NSFW 的站内 mod 尤其有用）。
+        if (ImGui.SmallButton("打开原页面")) OpenExternal(d.PageUrl);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("在默认浏览器里打开这条 Mod 的站点原页面\n" + d.PageUrl);
+        ImGui.SameLine();
+        if (ImGui.SmallButton("复制原链接")) ImGui.SetClipboardText(d.PageUrl);
+        if (d.AuthorPageUrl.Length > 0)
+        {
+            ImGui.SameLine();
+            if (ImGui.SmallButton("作者页")) OpenExternal(d.AuthorPageUrl);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("看这位作者的全部作品\n" + d.AuthorPageUrl);
+        }
+        ImGui.TextWrapped("原页面：" + d.PageUrl);
         DrawFavoriteControls(d, hit);
         DrawTranslateControls(d);
         if (_detailViaChannel)
@@ -1304,10 +1318,44 @@ public class MainWindow : Window
 
         if (d.IsExternalLink)
         {
-            ImGui.TextColored(Yellow, "这条 Mod 的文件在外部站点（作者外链），拿不到直链，没法一键安装。");
-            if (ImGui.Button("在浏览器打开")) OpenExternal(d.AbsoluteDownloadUrl);
+            // 主人定的策略：这种「作者把文件放在别处」的 mod，插件**不代下**，
+            // 只把跳转链接给你，点一下用系统默认浏览器打开 —— 你自己下载、自己装。
+            // 理由：那边通常要登录 / 选文件 / 过验证码，插件硬猜既不可靠也不安全。
+            if (!string.Equals(_loggedExternalMod, d.ModId, StringComparison.Ordinal))
+            {
+                _loggedExternalMod = d.ModId;
+                _plugin.Jobs.Note($"外链判定：{d.ModId}「{d.Title}」→ 外部站点 {d.DownloadHost}（不给一键安装）");
+            }
+
+            ImGui.TextColored(Yellow, "这条 Mod 的文件在作者的外部站点，插件不代下。");
+            ImGui.TextWrapped("点下面用浏览器打开，下载好以后自己装进 Penumbra（那边一般要登录或选文件，所以交给你）。");
+            ImGui.TextColored(Dim, $"跳转目标：{d.DownloadHost}");
+            ImGui.TextWrapped(d.AbsoluteDownloadUrl);
+
+            if (ImGui.Button("用默认浏览器打开", new Vector2(S(200f), 0)))
+                OpenExternal(d.AbsoluteDownloadUrl);
             ImGui.SameLine();
-            if (ImGui.Button("复制外链")) ImGui.SetClipboardText(d.AbsoluteDownloadUrl);
+            if (ImGui.Button("复制跳转链接")) ImGui.SetClipboardText(d.AbsoluteDownloadUrl);
+
+            // 万一「外链」这个判据哪天判错了（例如站点把下载改走 CDN 域名，
+            // 那会把所有 mod 都判成外链）—— 留一条不显眼的自救入口。
+            ImGui.Spacing();
+            if (_plugin.Penumbra.Available)
+            {
+                if (ImGui.SmallButton("判错了？仍然尝试直链下载并安装"))
+                {
+                    _plugin.Jobs.Note($"用户手动要求：对判定为外链的 {d.ModId} 仍然尝试直链下载：{d.AbsoluteDownloadUrl}");
+                    var coverFallback = d.Images.Count > 0 ? d.Images[0] : hit.ThumbUrl;
+                    _plugin.Jobs.Enqueue(d, coverFallback);
+                }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("正常情况用不到：外部站点的下载大多要登录或选文件，直连拿不到。\n" +
+                                     "留这个口子是为了防「站点换了下载域名 → 所有 mod 被误判成外链」。");
+            }
+            else
+            {
+                ImGui.TextColored(Dim, "（Penumbra 未连接，无法尝试安装）");
+            }
             return;
         }
 
@@ -2771,6 +2819,8 @@ public class MainWindow : Window
     private DateTime _cacheReportUtc = DateTime.MinValue;
     private string _cacheReport = string.Empty;
     private string _cacheMessage = string.Empty;
+    // 外链判定只往诊断日志写一次（不然每帧都写会刷屏）
+    private string _loggedExternalMod = string.Empty;
 
     /// <summary>插件 profile 里有没有 XIVModArchive 登录态（结果缓存 2 秒，免得每帧都去扫 cookie 库）。</summary>
     private bool OwnedLoginCached()

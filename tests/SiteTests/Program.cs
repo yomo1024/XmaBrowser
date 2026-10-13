@@ -26,6 +26,7 @@ var loginProbe = args.Contains("login");
 var perfProbe = args.Contains("perf");
 var imgProbe = args.Contains("imgprobe");
 var adPerfProbe = args.Contains("adperf");
+var externalProbe = args.Contains("externals");
 var oneCheck = args.Contains("one");
 var authorProbe = args.Contains("author");
 var pass = 0;
@@ -938,6 +939,67 @@ Console.WriteLine("=== 13n. 缓存维护：按上限淘汰 / 清过期（用真�
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 13o. 原页面链接 / 作者页 / 外链判定（用真实样本）===");
+{
+    // ① 链接构造：纯拼字符串，100% 可构造 —— 这就是「所有 mod 都有原地址」的依据
+    Check("原页面链接构造", XmaUrls.ModPage("141115") == "https://www.xivmodarchive.com/modid/141115");
+    Check("作者页链接构造（实测形态 /user/<数字id>）",
+          XmaUrls.UserPage("230603") == "https://www.xivmodarchive.com/user/230603");
+
+    // ② 拿真实详情样本跑一遍解析：作者 id 必须能解析出来（不然作者页入口是空的）
+    var detailPath = Path.Combine("samples", "mod_141115.html");
+    if (File.Exists(detailPath))
+    {
+        var real = XmaParser.ParseDetail(File.ReadAllText(detailPath), "141115",
+                                         XmaUrls.ModPage("141115"));
+        Check("真实样本：作者 id 解析出来了", real.AuthorId.Length > 0, real.AuthorId);
+        Check("真实样本：作者页链接可用",
+              real.AuthorPageUrl == XmaUrls.UserPage(real.AuthorId), real.AuthorPageUrl);
+        Check("真实样本：原页面链接就是该 mod 的站点页",
+              real.PageUrl == XmaUrls.ModPage("141115"), real.PageUrl);
+        Check("真实样本：站内下载链不算外链", !real.IsExternalLink, real.AbsoluteDownloadUrl);
+        Check("真实样本：站内下载链的主机是站点", real.DownloadHost == "www.xivmodarchive.com",
+              real.DownloadHost);
+    }
+    else
+    {
+        Console.WriteLine("  （跳过：找不到样本 mod_141115.html）");
+    }
+
+    // ③ 外链判定 + 主机提取：用**摸底测到的真实外链**做断言
+    foreach (var (href, expectedHost) in new[]
+    {
+        ("https://www.patreon.com/Liability/posts/protocol-146532471", "www.patreon.com"),
+        ("https://heliosphere.app/mod/c5wnrj1x0s59f5c8y36pk9f28w", "heliosphere.app"),
+    })
+    {
+        var extDet = new ModDetail { ModId = "1", DownloadHref = href };
+        Check($"真实外链被判为外链（{expectedHost}）", extDet.IsExternalLink, href);
+        Check($"真实外链的主机提取正确（{expectedHost}）", extDet.DownloadHost == expectedHost, extDet.DownloadHost);
+        Check($"外链时原页面链接依然有（{expectedHost}）",
+              extDet.PageUrl == XmaUrls.ModPage("1"), extDet.PageUrl);
+    }
+
+    // ④ 各种边角：不能因为显示逻辑抛异常
+    var noLink = new ModDetail { ModId = "7" };
+    Check("没有下载链接：不算外链、主机为空、原页面照样有",
+          !noLink.IsExternalLink && noLink.DownloadHost.Length == 0 &&
+          noLink.PageUrl == XmaUrls.ModPage("7"));
+
+    var relative = new ModDetail { ModId = "8", DownloadHref = "/private/abc/files/x.zip" };
+    Check("站内相对链接：补成绝对地址且不算外链",
+          relative.AbsoluteDownloadUrl.StartsWith(XmaUrls.Root, StringComparison.Ordinal) &&
+          !relative.IsExternalLink, relative.AbsoluteDownloadUrl);
+
+    var junk = new ModDetail { ModId = "9", DownloadHref = "not a url at all" };
+    Check("畸形链接：主机提取不抛异常（原样返回）", junk.DownloadHost.Length > 0, junk.DownloadHost);
+
+    var noAuthor = new ModDetail { ModId = "10", Url = "https://www.xivmodarchive.com/modid/10" };
+    Check("没有作者 id 时不给作者页链接（界面据此隐藏入口）", noAuthor.AuthorPageUrl.Length == 0);
+    Check("解析过的 Url 优先用作原页面", noAuthor.PageUrl == "https://www.xivmodarchive.com/modid/10");
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 13h. 挑战页/空页识别（浏览器通道取页面是否可用）===");
 {
     // 挑战页实测约 29KB —— 不能只按“小/空”判断，否则会把挑战页当成正常的“没有结果”。
@@ -1762,6 +1824,66 @@ if (adPerfProbe)
         Check("预览图直连能拿到（停滞检测不会误杀慢下载）", bytes.Length > 1000,
               $"{sw.ElapsedMilliseconds} ms / {bytes.Length} 字节");
     }
+}
+
+if (externalProbe)
+{
+    // 摸底：站上的「外链」到底跳去哪。看清形态再设计，别猜。
+    Console.WriteLine();
+    Console.WriteLine("=== 23. 站上真实外链摸底 ===");
+    var xSettings = new TestSettings();
+    using var xChannel = new BrowserChannel(xSettings, new TimeLog());
+
+    var ids = new List<string>();
+    for (var page = 1; page <= 2 && ids.Count < 14; page++)
+    {
+        var listUrl = XmaUrls.Search(new SearchQuery { Page = page, NsfwMode = 1 });
+        var listHtml = await xChannel.GetHtmlAsync(listUrl, CancellationToken.None);
+        if (listHtml is null)
+        {
+            Console.WriteLine($"  第 {page} 页列表取不到：{xChannel.LastError}");
+            continue;
+        }
+        foreach (var h in XmaParser.ParseSearch(listHtml, page, listUrl).Hits)
+        {
+            if (!ids.Contains(h.ModId)) ids.Add(h.ModId);
+            if (ids.Count >= 14) break;
+        }
+        Console.WriteLine($"  列表第 {page} 页 → 累计 {ids.Count} 个 mod id");
+    }
+
+    var hosts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    var samples = new List<string>();
+    var internalCount = 0;
+    var noLink = 0;
+
+    foreach (var id in ids)
+    {
+        var page2 = XmaUrls.ModPage(id);
+        var html2 = await xChannel.GetHtmlAsync(page2, CancellationToken.None);
+        if (html2 is null)
+        {
+            Console.WriteLine($"  {id}：取不到（{xChannel.LastError}）");
+            continue;
+        }
+
+        var det = XmaParser.ParseDetail(html2, id, page2);
+        if (det.DownloadHref.Length == 0) { noLink++; Console.WriteLine($"  {id}：页面上没有下载链接"); continue; }
+        if (!det.IsExternalLink) { internalCount++; continue; }
+
+        string host;
+        try { host = new Uri(det.AbsoluteDownloadUrl).Host; } catch { host = "(解析不了)"; }
+        hosts[host] = hosts.TryGetValue(host, out var c) ? c + 1 : 1;
+        samples.Add($"{id}  [{host}]  {det.AbsoluteDownloadUrl}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"  统计：站内直链 {internalCount} 个 / 外链 {samples.Count} 个 / 无链接 {noLink} 个");
+    Console.WriteLine("  --- 外链样本（modid, 主机, 完整 URL）---");
+    foreach (var s in samples) Console.WriteLine("    " + s);
+    Console.WriteLine("  --- 外链主机分布 ---");
+    foreach (var kv in hosts.OrderByDescending(k => k.Value))
+        Console.WriteLine($"    {kv.Key}: {kv.Value}");
 }
 
 Console.WriteLine();

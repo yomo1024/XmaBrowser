@@ -14,6 +14,9 @@ public static class XmaUrls
 
     public static string ModPage(string modId) => $"{Root}/modid/{modId}";
 
+    /// <summary>作者页（站内，100% 可构造）。实测形态：/user/230603（纯数字 id）。</summary>
+    public static string UserPage(string authorId) => $"{Root}/user/{authorId}";
+
     /// <summary>登录页（点下去会 302 到 Discord 的授权页 —— 站点没有密码表单）。</summary>
     public static string Login => $"{Root}/login";
 
@@ -153,6 +156,31 @@ public sealed class ModDetail
     /// <summary>true = 作者把文件放在外部站点（Patreon 等），插件拿不到直链，只能开浏览器。</summary>
     public bool IsExternalLink =>
         AbsoluteDownloadUrl.Length > 0 && !AbsoluteDownloadUrl.StartsWith(XmaUrls.Root, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 这条 mod 在站上的**原页面**地址。所有 mod 都有：
+    /// 它由站点 URL 直接拼出来（/modid/&lt;id&gt;），**不需要抓取、也不会缺**。
+    /// 优先用解析到的实际 URL（万一站点以后换了路径形态），兜底才拼。
+    /// </summary>
+    public string PageUrl => Url.Length > 0 ? Url : XmaUrls.ModPage(ModId);
+
+    /// <summary>作者页（站内）。AuthorId 解析不到时为空串 —— 界面据此决定要不要显示入口。</summary>
+    public string AuthorPageUrl => AuthorId.Length > 0 ? XmaUrls.UserPage(AuthorId) : string.Empty;
+
+    /// <summary>
+    /// 跳转目标的**主机名**（给界面显示用）：让人在点之前就知道要去哪儿。
+    /// 解析不了就返回原串，绝不因为显示而抛异常。
+    /// </summary>
+    public string DownloadHost
+    {
+        get
+        {
+            var url = AbsoluteDownloadUrl;
+            if (url.Length == 0) return string.Empty;
+            try { return new Uri(url).Host; }
+            catch { return url; }
+        }
+    }
 
     /// <summary>文件名（从 URL 猜，用于落盘命名）。</summary>
     public string FileNameHint
