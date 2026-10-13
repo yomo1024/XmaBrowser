@@ -51,6 +51,13 @@ public class MainWindow : Window
     private int _page = 1;
     private int _jumpPage = 1;
     private int _totalMods;
+    // 向下滚动流式加载：状态机（去重/到底判据）+ 在途标志 + 失败原因 + 自动触发预算
+    private readonly StreamState _stream = new();
+    private bool _streamBusy;
+    private string _streamError = string.Empty;
+    private int _streamAutoFired;
+    private float _lastScrollY;
+    private bool _listAtBottom;
 
     /// <summary>站点一页固定 15 条（实测），用于算总页数。</summary>
     private const int SitePageSize = 15;
@@ -293,6 +300,17 @@ public class MainWindow : Window
         var listWidth = MathF.Max(S(320f), avail.X * UiScale.ClampSplit(_plugin.Configuration.BrowseSplit));
 
         ImGui.BeginChild("xma-browse-left", new Vector2(listWidth, 0));
+
+        // 滚轮或滚动位置变化 = 用户又滑了一下 → 重置「自动加载」的预算。
+        // 有了这个预算，即使可见性判断失效（一直认为到底了），也不会把站点翻穿。
+        var wheelDelta = ImGui.GetIO().MouseWheel;
+        var scrollNow = ImGui.GetScrollY();
+        if (wheelDelta != 0f || MathF.Abs(scrollNow - _lastScrollY) > 1f)
+        {
+            _streamAutoFired = 0;
+            _lastScrollY = scrollNow;
+        }
+
         if (_plugin.Configuration.GridView) DrawResultGrid();
         else DrawResultList();
         ImGui.EndChild();
@@ -649,8 +667,11 @@ public class MainWindow : Window
 
         ImGui.SameLine();
         ImGui.TextColored(Dim, totalPages > 0
-            ? $"第 {_page} / {totalPages} 页　共 {_totalMods} 条（站点每页 {SitePageSize} 条）"
-            : $"第 {_page} 页");
+            ? $"从第 {_page} 页起　已加载 {_hits.Count} 条 / 站点共 {_totalMods} 条（每页 {SitePageSize} 条）"
+            : $"从第 {_page} 页起　已加载 {_hits.Count} 条");
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("「下一页 ▶」= 从这一页重新往下加载（不是往后翻一页）。\n" +
+                             "正常用法是往下滚动，列表底部会自动加载更多。");
 
         ImGui.SameLine();
         ImGui.BeginDisabled(_busy || _hits.Count == 0);
@@ -869,6 +890,7 @@ public class MainWindow : Window
         var hits = VisibleHits();
         if (hits.Count == 0)
         {
+            _listAtBottom = false;      // 空列表时别让哨兵的旧值触发自动加载
             if (_hits.Count > 0 && _plugin.Configuration.FavoritesOnlyFilter)
                 ImGui.TextColored(Dim, $"本页 {_hits.Count} 条里没有已收藏的 —— 取消下面的「只看收藏」看全部。");
             else
@@ -936,11 +958,18 @@ public class MainWindow : Window
                 ImGui.PopID();
             }
 
+            // 哨兵行：只为了判断「列表末尾有没有出现在视野里」。
+            // 列表用的是 ScrollY 表格（滚动发生在表格内部），所以用表格内元素的可见性最直接。
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn();
+            ImGui.Dummy(new Vector2(1f, 1f));
+            _listAtBottom = ImGui.IsItemVisible();
+
             ImGui.EndTable();
         }
 
-        ImGui.Spacing();
-        DrawPager("bottom");
+        DrawStreamFooter();
+        MaybeAutoLoadMore();
     }
 
     // ==================================================================== 宫格视图
@@ -950,6 +979,7 @@ public class MainWindow : Window
         var hits = VisibleHits();
         if (hits.Count == 0)
         {
+            _listAtBottom = false;
             if (_hits.Count > 0 && _plugin.Configuration.FavoritesOnlyFilter)
                 ImGui.TextColored(Dim, $"本页 {_hits.Count} 条里没有已收藏的 —— 取消「只看收藏」看全部。");
             else
@@ -971,11 +1001,18 @@ public class MainWindow : Window
                 ImGui.TableNextColumn();
                 DrawGridCard(hits[i], cardW);
             }
+
+            // 哨兵行（同列表视图）：判断末尾有没有进视野
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn();
+            ImGui.Dummy(new Vector2(1f, 1f));
+            _listAtBottom = ImGui.IsItemVisible();
+
             ImGui.EndTable();
         }
 
-        ImGui.Spacing();
-        DrawPager("grid-bottom");
+        DrawStreamFooter();
+        MaybeAutoLoadMore();
     }
 
     /// <summary>宫格里的一张卡：缩略图 + 标题（有中文就用中文）+ 类型/作者，整块可点。</summary>
@@ -1058,6 +1095,69 @@ public class MainWindow : Window
             });
         }
         catch { /* 打不开就算了，不影响功能 */ }
+    }
+
+    /// <summary>
+    /// 列表/宫格底部的状态行（原来这里是分页条）。
+    /// 流式加载的状态 + **手动兜底**：自动触发依赖 ImGui 的可见性判断，
+    /// 而我这边没有游戏、跑不了真界面，所以必须保留一个按钮 —— 万一自动没生效也能继续。
+    /// </summary>
+    private void DrawStreamFooter()
+    {
+        ImGui.Spacing();
+        ImGui.Separator();
+
+        if (_streamBusy)
+        {
+            ImGui.TextColored(Yellow, $"正在加载第 {_stream.NextPage} 页…");
+            ImGui.SameLine();
+            ImGui.TextColored(Dim, $"已加载 {_hits.Count} 条" +
+                                   (_stream.Total > 0 ? $" / 站点共 {_stream.Total} 条" : string.Empty));
+            return;
+        }
+
+        if (_streamError.Length > 0)
+        {
+            ImGui.TextColored(Red, "继续加载失败：" + _streamError);
+            ImGui.SameLine();
+            if (ImGui.Button("重试##stream-retry")) StartSearch(_stream.NextPage, append: true);
+            return;
+        }
+
+        if (_stream.End)
+        {
+            ImGui.TextColored(Dim, $"到底了：{_stream.EndReason}（共 {_hits.Count} 条）");
+            return;
+        }
+
+        if (ImGui.Button($"加载更多（下一页 {_stream.NextPage}）##stream-more"))
+            StartSearch(_stream.NextPage, append: true);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("向下滚动到底会自动加载。\n这个按钮是兜底：万一自动触发没生效，你还能手动继续。");
+        ImGui.SameLine();
+        ImGui.TextColored(Dim, $"已加载 {_hits.Count} 条" +
+                               (_stream.Total > 0 ? $" / 站点共 {_stream.Total} 条" : string.Empty));
+    }
+
+    /// <summary>一次滚动最多自动加载几页（防止可见性判断失效时把站点翻穿）。</summary>
+    private const int StreamAutoLimit = 5;
+
+    /// <summary>
+    /// 触底自动加载。
+    ///
+    /// ⚠ 诚实说明：这段依赖 ImGui 的「可见性」在 ScrollY 表格里的行为，
+    /// 而我这边没有游戏、跑不了真界面。所以加了两道保险，保证**不会失控**：
+    ///   ① 手势预算：一次滚动最多自动加载 <see cref="StreamAutoLimit"/> 页；
+    ///      任何滚轮/滚动动作都会重置预算。即使可见性判断一直为真，最多多下几页就停。
+    ///   ② 底部永远有「加载更多」按钮，自动失效也能用。
+    /// </summary>
+    private void MaybeAutoLoadMore()
+    {
+        if (!_listAtBottom || _streamBusy || _busy || _stream.End || _streamError.Length > 0) return;
+        if (_streamAutoFired >= StreamAutoLimit) return;
+
+        _streamAutoFired++;
+        StartSearch(_stream.NextPage, append: true);
     }
 
     /// <summary>按字符数截断（中英混排够用，不追求像素精确）。</summary>
@@ -2400,14 +2500,19 @@ public class MainWindow : Window
     /// </summary>
     private void ApplySearchResult(SearchResult result, int page, bool fromCache)
     {
-        _hits = result.Hits;
+        // 首屏：重置流式状态（清空去重集合），第一页也走同一条追加逻辑 ——
+        // 这样「去重 / 到底」的判据只有一份，首屏和后续加载不会两套代码走偏。
+        _stream.Reset(page, result.TotalMods);
+        var first = _stream.Append(result.Hits, result.TotalMods);
+        _hits = first.NewItems.ToList();
         _totalMods = result.TotalMods;
         _selected = null;
         _detail = null;
         _searchProgress.Complete();
-        _status = result.Hits.Count == 0
+        _status = _hits.Count == 0
             ? (fromCache ? "这一页没有结果（缓存）" : "这一页没有结果 —— 换个关键词，或放宽筛选")
-            : $"第 {page} 页，本页 {result.Hits.Count} 条" + (fromCache ? "（缓存，秒开）" : string.Empty);
+            : $"已加载 {_hits.Count} 条 / 站点共 {_totalMods} 条" + (fromCache ? "（缓存，秒开）" : string.Empty);
+        if (first.End) _plugin.Jobs.Note($"流式加载：首屏就到底了（{first.Reason}）");
 
         // 如果是「关注作者 → 看他作品」触发的，顺手算一下自上次以来的新品
         AfterSearchForFollowedAuthor();
@@ -2415,25 +2520,57 @@ public class MainWindow : Window
         MaintainCaches();
     }
 
-    private void StartSearch(int page)
+    /// <summary>向下滚动加载的更后一页：**追加**，绝不清空已有结果。</summary>
+    private void ApplyAppend(SearchResult result, int page, bool fromCache)
     {
-        if (_busy || page < 1) return;
+        var res = _stream.Append(result.Hits, result.TotalMods);
+        if (res.NewItems.Count > 0) _hits.AddRange(res.NewItems);
+        if (result.TotalMods > 0) _totalMods = result.TotalMods;
+        _status = $"已加载 {_hits.Count} 条 / 站点共 {_totalMods} 条" +
+                  (fromCache ? "（缓存，秒开）" : string.Empty);
+        _plugin.Jobs.Note($"流式加载第 {page} 页：本页 {result.Hits.Count} 条 → 新增 {res.NewItems.Count} 条" +
+                          (res.End ? $"；到底（{res.Reason}）" : string.Empty));
+    }
 
-        _page = page;
-        _jumpPage = page;
+    private void StartSearch(int page, bool append = false)
+    {
+        if (append)
+        {
+            // 追加：绝不动 _busy（那是首屏搜索的状态，动了界面会整块变「搜索中」）
+            if (_streamBusy || _busy || _stream.End || page < 1) return;
+            _streamBusy = true;
+            _streamError = string.Empty;
+        }
+        else
+        {
+            if (_busy || page < 1) return;
+            _page = page;
+            _jumpPage = page;
+            _stream.Reset(page);          // 新一轮流式加载从这一页开始
+            _streamBusy = false;
+            _streamError = string.Empty;
+            _streamAutoFired = 0;
+        }
+
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
         // 搜索也加总看门狗：到点就放弃并说明，别让人无限等
         _cts.CancelAfter(TimeSpan.FromSeconds(FetchLimits.SearchTimeoutSeconds));
         var ct = _cts.Token;
 
-        _busy = true;
-        _error = string.Empty;
-        _viaChannel = false;
-        _status = $"搜索中…（第 {page} 页）";
-
-        _searchProgress = LoadProgress.ForSearch($"第 {page} 页");
-        _searchProgress.Begin();
+        if (append)
+        {
+            _status = $"正在加载更多（第 {page} 页）…";
+        }
+        else
+        {
+            _busy = true;
+            _error = string.Empty;
+            _viaChannel = false;
+            _status = $"搜索中…（第 {page} 页）";
+            _searchProgress = LoadProgress.ForSearch($"第 {page} 页");
+            _searchProgress.Begin();
+        }
         var nsfwMode = _form.NsfwMode;
 
         var query = _form.ToQuery(page);
@@ -2453,7 +2590,8 @@ public class MainWindow : Window
                 {
                     _searchProgress.Enter(0, "命中缓存");
                     _plugin.Jobs.Note($"搜索缓存命中：{pageUrl[..Math.Min(80, pageUrl.Length)]}");
-                    ApplySearchResult(cached, page, fromCache: true);
+                    if (append) ApplyAppend(cached, page, fromCache: true);
+                    else ApplySearchResult(cached, page, fromCache: true);
                     return;
                 }
 
@@ -2540,39 +2678,67 @@ public class MainWindow : Window
                 }
 
                 _searchCache.Put(pageUrl, result);
-                ApplySearchResult(result, page, fromCache: false);
+                if (append) ApplyAppend(result, page, fromCache: false);
+                else ApplySearchResult(result, page, fromCache: false);
 
-                // ⭐ 搜完就顺手把浏览器预热好：NSFW 模式下接下来点开的每个详情、每张预览图都要走通道，
-                // 提前把会话建好（实测省约 1 秒），点开就不用再等。**不访问站点**，所以没有额外请求。
-                if (nsfwMode != 0 && channel.Enabled)
-                    _ = Task.Run(() => channel.WarmUpAsync());
+                if (!append)
+                {
+                    // ⭐ 搜完就顺手把浏览器预热好：NSFW 模式下接下来点开的每个详情、每张预览图都要走通道，
+                    // 提前把会话建好（实测省约 1 秒），点开就不用再等。**不访问站点**，所以没有额外请求。
+                    if (nsfwMode != 0 && channel.Enabled)
+                        _ = Task.Run(() => channel.WarmUpAsync());
 
-                cfg.OnlyDtCompatible = _form.OnlyDtCompatible;
-                cfg.NsfwMode = _form.NsfwMode;
-                cfg.Save();
+                    cfg.OnlyDtCompatible = _form.OnlyDtCompatible;
+                    cfg.NsfwMode = _form.NsfwMode;
+                    cfg.Save();
+                }
             }
             catch (XmaAccessException e)
             {
-                _error = e.Message;
-                _status = "被站点拒绝";
-                _searchProgress.Fail(e.Message);
+                if (append) AppendFailed(e.Message);
+                else
+                {
+                    _error = e.Message;
+                    _status = "被站点拒绝";
+                    _searchProgress.Fail(e.Message);
+                }
             }
             catch (OperationCanceledException)
             {
-                _status = $"已取消或超时（超过 {FetchLimits.SearchTimeoutSeconds} 秒）";
-                _searchProgress.Fail(_status);
+                if (append) AppendFailed("加载被取消或超时");
+                else
+                {
+                    _status = $"已取消或超时（超过 {FetchLimits.SearchTimeoutSeconds} 秒）";
+                    _searchProgress.Fail(_status);
+                }
             }
             catch (Exception e)
             {
-                _error = $"{e.GetType().Name}: {e.Message}";
-                _status = "搜索失败";
-                _searchProgress.Fail(_error);
+                if (append) AppendFailed($"{e.GetType().Name}: {e.Message}");
+                else
+                {
+                    _error = $"{e.GetType().Name}: {e.Message}";
+                    _status = "搜索失败";
+                    _searchProgress.Fail(_error);
+                }
             }
             finally
             {
-                _busy = false;
+                if (append) _streamBusy = false;
+                else _busy = false;
             }
         }, ct);
+    }
+
+    /// <summary>
+    /// 追加失败：**保留已有结果**，只在底部状态行里说明并给「重试」。
+    /// 不能因为第 8 页失败就把看了半天的前 7 页清掉。
+    /// </summary>
+    private void AppendFailed(string why)
+    {
+        _streamError = why;
+        _status = $"已加载 {_hits.Count} 条（继续加载失败，可重试）";
+        _plugin.Jobs.Note($"流式加载第 {_stream.NextPage} 页失败：{why}");
     }
 
     private void LoadDetail(SearchHit hit)

@@ -27,6 +27,7 @@ var perfProbe = args.Contains("perf");
 var imgProbe = args.Contains("imgprobe");
 var adPerfProbe = args.Contains("adperf");
 var externalProbe = args.Contains("externals");
+var streamProbe = args.Contains("stream");
 var oneCheck = args.Contains("one");
 var authorProbe = args.Contains("author");
 var pass = 0;
@@ -1000,6 +1001,79 @@ Console.WriteLine("=== 13o. 原页面链接 / 作者页 / 外链判定（用真�
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 13p. 流式加载状态机（去重 / 到底判据 / 别失控）===");
+{
+    SearchHit H(string id) => new() { ModId = id, Title = "t" + id };
+
+    // 基本推进
+    var s = new StreamState();
+    s.Reset(1, 100);
+    Check("初始：下一页就是起始页、没到底", s.NextPage == 1 && !s.End && s.StartPage == 1);
+
+    var r1 = s.Append([H("1"), H("2"), H("3")], 100);
+    Check("追加：新增 3 条", r1.NewItems.Count == 3 && s.Loaded == 3, s.Loaded.ToString());
+    Check("追加后页号推进到 2", s.NextPage == 2, s.NextPage.ToString());
+
+    // 去重：相邻页重复（站点在翻页期间发新 mod 就会这样）
+    var r2 = s.Append([H("3"), H("4")], 100);
+    Check("去重：只把没见过的那条算新增", r2.NewItems.Count == 1 && r2.NewItems[0].ModId == "4",
+          string.Join(",", r2.NewItems.Select(h => h.ModId)));
+    Check("累计数只算真正新增的", s.Loaded == 4, s.Loaded.ToString());
+
+    // 连续整页重复 → 停下来（不能死循环）
+    var dup1 = s.Append([H("4")], 100);
+    Check("整页重复第 1 次：还不算到底", !dup1.End && s.NoProgressStrikes == 1);
+    var dup2 = s.Append([H("4")], 100);
+    Check("连续整页重复第 2 次：判定到底（防死循环）", dup2.End && s.End, s.EndReason);
+    Check("到底后不再返回新增", s.Append([H("9")], 100).NewItems.Count == 0);
+
+    // 空页 = 到底
+    var e = new StreamState();
+    e.Reset(1, 0);
+    e.Append([H("1")], 0);
+    var empty = e.Append([], 0);
+    Check("空页判定到底", empty.End && e.End, e.EndReason);
+
+    // 加载到站点总数 = 到底
+    var t = new StreamState();
+    t.Reset(1, 15);
+    var full = t.Append([.. Enumerable.Range(1, 15).Select(i => H("m" + i))], 15);
+    Check("加载数达到站点总数 → 到底", full.End && t.Loaded == 15, t.EndReason);
+
+    // 没有 ModId 的条目要跳过（详情/原页面链接都靠它，留着没用）
+    var bad = new StreamState();
+    bad.Reset(1, 0);
+    var badRes = bad.Append([new SearchHit { ModId = "" }, H("x")], 0);
+    Check("跳过没有 ModId 的条目", badRes.NewItems.Count == 1 && badRes.NewItems[0].ModId == "x");
+
+    // 页号硬上限（判据出问题时的保险）
+    var deep = new StreamState();
+    deep.Reset(StreamState.MaxPage, 0);
+    var deepRes = deep.Append([H("z1")], 0);
+    Check("页号超过硬上限就停（别把站点翻穿）", deepRes.End, deep.EndReason);
+
+    // Reset 要清干净（新搜索不能沿用旧的去重集合）
+    var rt = new StreamState();
+    rt.Reset(1, 0);
+    rt.Append([H("a")], 0);
+    rt.Reset(5, 0);
+    Check("Reset 之后去重集合清空、页号归位、累计归零",
+          rt.NextPage == 5 && rt.Loaded == 0 && !rt.End && rt.PagesFetched == 0);
+    var afterReset = rt.Append([H("a")], 0);
+    Check("Reset 后同一条又算新增（新搜索是全新结果集）", afterReset.NewItems.Count == 1);
+
+    // 到底之后再 Reset 要能重新开始
+    var again = new StreamState();
+    again.Reset(1, 0);
+    again.Append([], 0);
+    var wasEnd = again.End;
+    again.Reset(1, 0);
+    Check("到底后再 Reset 可以重新开始（新搜索别被上一次的『到底』锁住）", wasEnd && !again.End);
+
+    Check("进度文案：知道总数时显示 x / y", new StreamState().ProgressText.Length > 0);
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 13h. 挑战页/空页识别（浏览器通道取页面是否可用）===");
 {
     // 挑战页实测约 29KB —— 不能只按“小/空”判断，否则会把挑战页当成正常的“没有结果”。
@@ -1884,6 +1958,42 @@ if (externalProbe)
     Console.WriteLine("  --- 外链主机分布 ---");
     foreach (var kv in hosts.OrderByDescending(k => k.Value))
         Console.WriteLine($"    {kv.Key}: {kv.Value}");
+}
+
+if (streamProbe)
+{
+    // 用真实站点模拟「往下滚三页」：验证 解析 → 去重 → 页号推进 → 到底判据 这条链。
+    // （触底触发依赖 ImGui 可见性，没有游戏测不了，所以这里只验数据链。）
+    Console.WriteLine();
+    Console.WriteLine("=== 24. 流式加载数据链实测（真实站点，连取 3 页）===");
+    var stSettings = new TestSettings();
+    using var stChannel = new BrowserChannel(stSettings, new TimeLog());
+    var st = new StreamState();
+    st.Reset(1);
+
+    for (var page = st.NextPage; page <= 3 && !st.End; page = st.NextPage)
+    {
+        var stUrl = XmaUrls.Search(new SearchQuery { Page = page, NsfwMode = 1 });
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var html = await stChannel.GetHtmlAsync(stUrl, CancellationToken.None);
+        sw.Stop();
+        if (html is null)
+        {
+            Console.WriteLine($"  第 {page} 页取不到：{stChannel.LastError}");
+            break;
+        }
+
+        var parsed = XmaParser.ParseSearch(html, page, stUrl);
+        var res = st.Append(parsed.Hits, parsed.TotalMods);
+        Console.WriteLine($"  第 {page} 页：站点给 {parsed.Hits.Count} 条 → 新增 {res.NewItems.Count} 条" +
+                          $"（{sw.ElapsedMilliseconds} ms，累计 {st.Loaded} 条，站点总数 {st.Total}）" +
+                          (res.End ? $"  → 到底：{res.Reason}" : $"  → 下一页 {st.NextPage}"));
+    }
+
+    Check("真实站点：取到了内容", st.Loaded > 0, st.Loaded.ToString());
+    Check("真实站点：三页之间没有重复（去重生效）", st.Loaded >= 15, st.Loaded.ToString());
+    Check("真实站点：页号正常推进", st.NextPage > 1, st.NextPage.ToString());
+    Check("真实站点：没误判到底", !st.End || st.EndReason.Length > 0, st.EndReason);
 }
 
 Console.WriteLine();
