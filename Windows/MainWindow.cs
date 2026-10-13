@@ -901,11 +901,19 @@ public class MainWindow : Window
 
         const ImGuiTableFlags flags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
                                      ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingFixedFit;
-        if (ImGui.BeginTable("xma-hits", 7, flags))
+        // 表格给**显式高度**（把底部状态行留出来）：不然表格会把外层 child 撑出滚动条，
+        // 于是「外层一条 + 表格一条」两个滚动条同时出现。
+        var tableH = MathF.Max(S(120f), ImGui.GetContentRegionAvail().Y - FooterReserveH());
+        if (ImGui.BeginTable("xma-hits", 7, flags, new Vector2(0f, tableH)))
         {
             ImGui.TableSetupScrollFreeze(0, 1);
-            ImGui.TableSetupColumn("★", ImGuiTableColumnFlags.WidthFixed, S(30f));
-            ImGui.TableSetupColumn("图", ImGuiTableColumnFlags.WidthFixed, S(74f));
+            // ⭐ 列宽必须把**单元格内边距**算进去：列宽度 ≠ 内容区宽度，
+            //    内容区 = 列宽 − 2×CellPadding.X。原来 ★ 列 30px 里塞 26px 按钮、
+            //    图列 74px 里塞 68px 图片，内容区其实分别只有 22 / 66 —— 都会溢出。
+            //    现在直接按「控件宽度 + 内边距」派生列宽，不再手写会打架的数字。
+            var cellPadX = ImGui.GetStyle().CellPadding.X * 2f;
+            ImGui.TableSetupColumn("★", ImGuiTableColumnFlags.WidthFixed, GridLayout.ColumnWidthFor(S(26f), cellPadX));
+            ImGui.TableSetupColumn("图", ImGuiTableColumnFlags.WidthFixed, GridLayout.ColumnWidthFor(S(68f), cellPadX));
             ImGui.TableSetupColumn("Mod", ImGuiTableColumnFlags.WidthStretch);
             ImGui.TableSetupColumn("作者", ImGuiTableColumnFlags.WidthFixed, S(116f));
             ImGui.TableSetupColumn("类型", ImGuiTableColumnFlags.WidthFixed, S(92f));
@@ -989,13 +997,25 @@ public class MainWindow : Window
         }
 
         var cfg = _plugin.Configuration;
-        var cardW = MathF.Max(S(110f), cfg.GridCardWidth * _s);
+        // ⭐ 列宽 ≠ 可用宽度：单元格内边距会吃掉两侧（默认 CellPadding.X=4 → 两边 8px）。
+        //    卡片实际能用的宽度 = 列宽 − 单元内边距；不扣这一下，卡片就会横向溢出列，又冒出滚动条。
+        var cellPadX = ImGui.GetStyle().CellPadding.X * 2f;
+        var colW = MathF.Max(S(110f), cfg.GridCardWidth * _s);
+        var cardW = MathF.Max(S(72f), colW - cellPadX);
         var sp = ImGui.GetStyle().ItemSpacing.X;
         var avail = ImGui.GetContentRegionAvail().X;
-        var cols = Math.Max(1, (int)((avail + sp) / (cardW + sp)));
+        var cols = Math.Max(1, (int)((avail + sp) / (colW + sp)));
 
-        if (ImGui.BeginTable("xma-grid", cols, ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingFixedFit))
+        // 同列表视图：表格给显式高度，避免外层 child 再冒一条滚动条
+        var tableH = MathF.Max(S(160f), ImGui.GetContentRegionAvail().Y - FooterReserveH());
+        if (ImGui.BeginTable("xma-grid", cols, ImGuiTableFlags.ScrollY | ImGuiTableFlags.SizingFixedFit,
+                             new Vector2(0f, tableH)))
         {
+            // 列宽钉死成 colW：靠 ImGui 自动算宽度时，单元格内边距一叠加就可能溢出
+            // （溢出的那些像素正是「图片旁边多一条滚动条」的来源）。
+            for (var c = 0; c < cols; c++)
+                ImGui.TableSetupColumn($"g{c}", ImGuiTableColumnFlags.WidthFixed, colW);
+
             for (var i = 0; i < hits.Count; i++)
             {
                 if (i % cols == 0) ImGui.TableNextRow();
@@ -1021,17 +1041,37 @@ public class MainWindow : Window
     {
         var cfg = _plugin.Configuration;
         var selected = _selected?.ModId == hit.ModId;
-        var imgW = cardW - 12f;
-        var imgH = imgW * 0.56f;
-        var cardH = imgH + 50f;
+
+        // ⭐ 尺寸全部按**真实**度量算，不再手写常量：
+        //   ① 图片可用宽 = 卡片宽 − 子窗口内边距 − 子窗口边框。
+        //      原来的 cardW-12 比真实内部宽度大（默认内边距 8 + 边框 1，翻倍后约 18），
+        //      图片横向溢出 → 每张卡都长出横向滚动条；
+        //   ② 卡片高 = 内部留白 + 取景框 + 一行按钮 + 一行文字 + 富余。
+        //      原来的 imgH+50 装不下，又长出纵向滚动条。
+        var style = ImGui.GetStyle();
+        var padX = GridLayout.InnerPadX(style.WindowPadding.X, style.ChildBorderSize);
+        var padY = GridLayout.InnerPadY(style.WindowPadding.Y, style.ChildBorderSize);
+        var box = GridLayout.ThumbBox(cardW, padX);
+        var cardH = GridLayout.CardHeight(padY, box.Y,
+                                         ImGui.GetFrameHeightWithSpacing(),      // ★/☆ 那一行
+                                         ImGui.GetTextLineHeightWithSpacing());  // 「类型 · 作者」那一行
 
         ImGui.PushID("grid-" + hit.ModId);
         ImGui.PushStyleColor(ImGuiCol.ChildBg, selected ? SelBg : CardBg);
-        ImGui.BeginChild("c", new Vector2(cardW, cardH), true);
+        // ⭐ 显式禁止滚动：即使上面的估算差一两个像素，也只会轻微裁切，绝不会冒出滚动条。
+        ImGui.BeginChild("c", new Vector2(cardW, cardH), true,
+                         ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
 
         var wrap = _plugin.Thumbs.Get(hit.ThumbUrl)?.GetWrapOrDefault();
-        if (wrap is not null) ImGui.Image(wrap.Handle, Fit(wrap.Size, imgW, imgH));
-        else ImGui.Dummy(new Vector2(imgW, imgH));
+        if (wrap is not null)
+        {
+            // 等比缩放到取景框内 + 水平居中；高度不足时补空 —— 保证每张卡高度完全一致。
+            var draw = GridLayout.Fit(wrap.Size, box.X, box.Y);
+            if (draw.X < box.X) ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (box.X - draw.X) * 0.5f);
+            ImGui.Image(wrap.Handle, draw);
+            if (draw.Y < box.Y) ImGui.Dummy(new Vector2(1f, box.Y - draw.Y));
+        }
+        else ImGui.Dummy(new Vector2(box.X, box.Y));
 
         var zh = cfg.ShowTranslatedTitles ? _plugin.Translator.Cached(hit.Title) : null;
         var title = zh is { Length: > 0 } ? zh : hit.Title;
@@ -3117,12 +3157,15 @@ public class MainWindow : Window
 
     private static string Fmt(DateTime? t) => t?.ToString("yyyy-MM-dd HH:mm") ?? "-";
 
-    private static Vector2 Fit(Vector2 src, float maxW, float maxH)
-    {
-        if (src.X <= 0 || src.Y <= 0) return new Vector2(maxW, maxH);
-        var k = MathF.Min(maxW / src.X, maxH / src.Y);
-        return new Vector2(src.X * k, src.Y * k);
-    }
+    /// <summary>
+    /// 等比缩放（contain）：结果两个方向都不超过给的上限，保持宽高比。
+    /// 实现在 <see cref="GridLayout.Fit"/>（纯函数，可离线断言「绝不超出容器」这条不变量）。
+    /// </summary>
+    private static Vector2 Fit(Vector2 src, float maxW, float maxH) => GridLayout.Fit(src, maxW, maxH);
+
+    /// <summary>底部状态行要占的高度：表格必须给它留出空间，否则外层 child 会长出滚动条（双滚动条）。</summary>
+    private static float FooterReserveH()
+        => ImGui.GetFrameHeight() + ImGui.GetStyle().ItemSpacing.Y * 3f + 8f;
 
     private static void OpenExternal(string target)
     {

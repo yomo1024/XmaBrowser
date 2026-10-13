@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Numerics;
 using System.Threading.Tasks;
 using XmaBrowser.Browser;
 using XmaBrowser.Cover;
@@ -1101,6 +1102,85 @@ Console.WriteLine("=== 13p. 流式加载状态机（去重 / 到底判据 / 别�
     // 边界：空输入
     Check("Merge 空 + 空 = 空列表", StreamState.Merge([], []).Count == 0);
     Check("Merge 空 + 有 = 有", StreamState.Merge([], [H("x")]).Count == 1);
+}
+
+Console.WriteLine();
+Console.WriteLine("=== 13q. 界面尺寸计算（保证「图片不超过取景框」= 不出滚动条）===");
+{
+    // ① 核心不变量：等比缩放后，两个方向都**绝不超过**容器。
+    //    超出去一点点，ImGui 就会在那个容器上长出滚动条 —— 这次 bug 的根源。
+    var cases = new (float W, float H)[]
+    {
+        (1920, 1080), (1080, 1920), (1600, 400), (400, 1600), (1, 1000), (1000, 1),
+        (500, 500), (3, 2), (2048, 1), (1, 2048),
+    };
+    var overflow = new List<string>();
+    var aspectBad = new List<string>();
+    foreach (var (w, h) in cases)
+    {
+        var box = new Vector2(300f, 168f);
+        var fit = GridLayout.Fit(new Vector2(w, h), box.X, box.Y);
+        if (fit.X > box.X + 0.01f || fit.Y > box.Y + 0.01f) overflow.Add($"{w}x{h}→{fit.X:0.#}x{fit.Y:0.#}");
+        if (fit.X <= 0f || fit.Y <= 0f) overflow.Add($"{w}x{h} 退化成非正数");
+        // 等比：两边比例都要保持不变（容差内）
+        var srcAspect = w / h;
+        var fitAspect = fit.X / fit.Y;
+        if (MathF.Abs(srcAspect - fitAspect) > 0.01f * MathF.Max(1f, srcAspect)) aspectBad.Add($"{w}x{h}");
+    }
+    Check("等比缩放后绝不超出取景框（超一点就出滚动条）", overflow.Count == 0, string.Join(", ", overflow));
+    Check("等比缩放保持宽高比（图片不变形）", aspectBad.Count == 0, string.Join(", ", aspectBad));
+
+    // 至少有一个方向贴满（contain 不能缩得过小）
+    var tight = GridLayout.Fit(new Vector2(1920, 1080), 300f, 168f);
+    Check("contain 语义：至少一个方向贴满容器",
+          MathF.Abs(tight.X - 300f) < 0.01f || MathF.Abs(tight.Y - 168f) < 0.01f,
+          $"{tight.X:0.#}x{tight.Y:0.#}");
+
+    // ② 退化输入不能把界面搞崩（NaN/0/负数都要给出有限正数）
+    foreach (var (w, h) in new[] { (0f, 100f), (100f, 0f), (-5f, 100f), (float.NaN, 100f), (float.PositiveInfinity, 10f) })
+    {
+        var fit = GridLayout.Fit(new Vector2(w, h), 200f, 100f);
+        Check($"退化输入 ({w},{h}) 返回有限正数",
+              fit.X > 0f && fit.Y > 0f && !float.IsNaN(fit.X) && !float.IsNaN(fit.Y),
+              $"{fit.X}x{fit.Y}");
+    }
+
+    // ③ 取景框宽度绝不能超过卡片宽度（这是「图片横向溢出」的直接判据）
+    foreach (var cardW in new[] { 110f, 172f, 240f, 400f })
+    {
+        foreach (var pad in new[] { 0f, 12f, 18f, 40f })
+        {
+            var box = GridLayout.ThumbBox(cardW, pad);
+            Check($"取景框不宽于卡片（cardW={cardW} pad={pad}）", box.X <= MathF.Max(24f, cardW) + 0.01f,
+                  $"{box.X:0.#} vs {cardW}");
+        }
+    }
+
+    // ④ 卡片高度必须覆盖内容（内边距 + 取景框 + 按钮行 + 文字行），否则又出纵向滚动条
+    var cardHeight = GridLayout.CardHeight(16f, 96.3f, 27f, 20f);
+    Check("卡片高度覆盖全部内容（含富余）", cardHeight >= 16f + 96.3f + 27f + 20f, cardHeight.ToString("0.#"));
+    Check("卡片高度对退化输入也安全",
+          GridLayout.CardHeight(float.NaN, -1f, 0f, float.NaN) > 0f);
+
+    // ⑤ 内边距计算：默认样式下确实要扣掉约 18px（这正是老代码 cardW-12 出错的地方）
+    Check("内边距扣减量符合 ImGui 默认样式（8*2 + 1*2 = 18）",
+          MathF.Abs(GridLayout.InnerPadX(8f, 1f) - 18f) < 0.01f,
+          GridLayout.InnerPadX(8f, 1f).ToString("0.#"));
+
+    // ⑥ 列宽 ≥ 控件宽 + 单元内边距（今天踩了两次的那条规则）
+    var padViolations = new List<string>();
+    foreach (var widgetW in new[] { 1f, 20f, 26f, 68f, 120f, 300f })
+    {
+        foreach (var cellPadX in new[] { 0f, 6f, 8f, 16f })
+        {
+            var colW = GridLayout.ColumnWidthFor(widgetW, cellPadX);
+            // 列宽扣掉内边距后（= 内容区）必须还能装下控件
+            if (colW - cellPadX < widgetW - 0.01f) padViolations.Add($"{widgetW}/{cellPadX}");
+        }
+    }
+    Check("列宽扣掉单元格内边距后仍能装下控件（否则又溢出）", padViolations.Count == 0,
+          string.Join(", ", padViolations));
+    Check("列宽对退化输入也安全", GridLayout.ColumnWidthFor(float.NaN, -5f) >= 0f);
 }
 
 Console.WriteLine();

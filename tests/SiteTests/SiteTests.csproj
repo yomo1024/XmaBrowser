@@ -51,6 +51,7 @@
     <Compile Include="..\..\Ui\ImageJobState.cs" />
     <Compile Include="..\..\Ui\CacheMaintenance.cs" />
     <Compile Include="..\..\Ui\StreamState.cs" />
+    <Compile Include="..\..\Ui\GridLayout.cs" />
   </ItemGroup>
 
   <ItemGroup>
