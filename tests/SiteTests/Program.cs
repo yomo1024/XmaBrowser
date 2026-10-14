@@ -28,6 +28,7 @@ var perfProbe = args.Contains("perf");
 var imgProbe = args.Contains("imgprobe");
 var inspectProbe = args.Contains("inspect");
 var nameTestProbe = args.Contains("nametest");
+var chanSearchProbe = args.Contains("chansearch");
 var adPerfProbe = args.Contains("adperf");
 var externalProbe = args.Contains("externals");
 var streamProbe = args.Contains("stream");
@@ -437,6 +438,13 @@ Console.WriteLine("=== 9e. 0 条时要说清原因（不能只有一句「没有
     Check("每种结论都带上实际请求的 URL（便于定位）",
           dNormal.Contains("https://x/search?name=a") && dTiny.Contains("https://x/search"));
     Check("可疑小页面的阈值有常量可查", EmptyResultDiagnosis.SuspiciouslySmallBytes > 1024);
+
+    // 通道 0 条时的兜底决策（混合模式下每次搜索都走通道，通道一坏就「一条都没有」）
+    Check("通道 0 条 + 允许兜底 → 该去试直连",
+          SearchRouting.ShouldFallbackToDirect(0, true));
+    Check("通道有结果时不动它（绝不画蛇添足）",
+          !SearchRouting.ShouldFallbackToDirect(1, true) && !SearchRouting.ShouldFallbackToDirect(15, true));
+    Check("用户关掉了自动降级 → 不自作主张", !SearchRouting.ShouldFallbackToDirect(0, false));
 }
 
 static bool ResetIsFullText()
@@ -2366,6 +2374,56 @@ if (nameTestProbe)
         Console.WriteLine($"     全文={asFull} → 解析到 {r.Hits.Count} 条（站点总数标记 {r.TotalMods}）");
         foreach (var h in r.Hits.Take(3)) Console.WriteLine($"         · {h.Title}  [{h.ModId}]");
         Console.WriteLine($"         {r.Url}");
+    }
+}
+
+if (chanSearchProbe)
+{
+    // 主人的场景：**混合模式** → 搜索每次都走浏览器通道（headless Chrome），不走直连。
+    // 这条路径此前从未被实测过。这里用通道取同一个搜索 URL，看到底拿到什么。
+    Console.WriteLine();
+    Console.WriteLine("=== 混合模式的真实路径：搜索走浏览器通道 ===");
+    var csSettings = new TestSettings();
+    var csCache = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "chansearch");
+    Directory.CreateDirectory(csCache);
+    using var csChannel = new BrowserChannel(csSettings, new TimeLog());
+
+    foreach (var asFull in new[] { false, true })
+    {
+        var cq = new SearchQuery
+        {
+            Text = "Bellissente",
+            TextAsFullText = asFull,
+            NsfwMode = 1,              // 混合：不传 nsfw 参数，必须带登录态
+            OnlyDtCompatible = true,
+            Page = 1,
+        };
+        var cu = XmaUrls.Search(cq);
+        var label = asFull ? "全文 basic_text" : "标题 name";
+        Console.WriteLine($"   关键词语义 = {label}");
+        Console.WriteLine($"      {cu}");
+
+        var csw = System.Diagnostics.Stopwatch.StartNew();
+        var chtml = await csChannel.GetHtmlAsync(cu, CancellationToken.None);
+        csw.Stop();
+
+        if (chtml is null)
+        {
+            Console.WriteLine($"      ❌ 通道取不到页面：{csChannel.LastError}");
+            Check($"通道搜索({label})", false, csChannel.LastError);
+            continue;
+        }
+
+        var cfacts = LoginStateDetector.Analyze(chtml);
+        var cparsed = XmaParser.ParseSearch(chtml, 1, cu);
+        Console.WriteLine($"      取到 {chtml.Length} 字节 / {csw.ElapsedMilliseconds} ms｜登录态 {cfacts.State}｜页面卡片 {cfacts.CardCount} 张");
+        Console.WriteLine($"      解析出 {cparsed.Hits.Count} 条：{string.Join(" | ", cparsed.Hits.Take(3).Select(h => h.Title))}");
+        if (cparsed.Hits.Count == 0)
+            Console.WriteLine($"      诊断：{EmptyResultDiagnosis.Describe(chtml, cu)}");
+
+        Check($"通道搜索({label}) 能搜到 Bellissente",
+              cparsed.Hits.Any(h => h.Title.Contains("Bellissente")),
+              $"{chtml.Length} 字节 / {cfacts.CardCount} 卡 / 解析 {cparsed.Hits.Count} 条");
     }
 }
 

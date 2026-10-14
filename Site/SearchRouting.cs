@@ -14,4 +14,18 @@ public static class SearchRouting
     /// <summary>NSFW 模式（0=排除 1=混合 2=只看）是否必须优先走浏览器通道。</summary>
     public static bool MustUseBrowserChannel(int nsfwMode, bool channelEnabled, bool autoFallbackToBrowser)
         => nsfwMode != 0 && channelEnabled && autoFallbackToBrowser;
+
+    /// <summary>
+    /// 通道拿到 0 条时，要不要再用直连兜一次。
+    ///
+    /// 为什么需要：混合/只看 NSFW 模式下**每次搜索都走浏览器通道**，而通道是 headless Chrome，
+    /// 被 Cloudflare 挑战或不带登录态时就会返回 0 张卡片 —— 用户看到的是「一条都没有」，
+    /// 且不知道为什么。直连虽然拿不到 NSFW，但至少能给出 SFW 结果 + 说明「本次可能缺 NSFW」，
+    /// 这比一片空白有用得多。
+    ///
+    /// 不会误伤：登录态下的混合结果 ⊇ 未登录的直连结果，所以通道真的是 0 条时，
+    /// 直连不可能凭空多出结果来 —— 只有通道页面本身坏了，兜底才会有产出。
+    /// </summary>
+    public static bool ShouldFallbackToDirect(int channelHits, bool autoFallbackToBrowser)
+        => autoFallbackToBrowser && channelHits == 0;
 }

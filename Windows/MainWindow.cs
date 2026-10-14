@@ -2864,8 +2864,6 @@ public class MainWindow : Window
                         var parseSw = System.Diagnostics.Stopwatch.StartNew();
                         result = XmaParser.ParseSearch(chHtmlOk, query.Page, pageUrl);
                         parseSw.Stop();
-                        if (result.Hits.Count == 0)
-                            result.Diagnostic = EmptyResultDiagnosis.Describe(chHtmlOk, pageUrl) + "（走的是浏览器通道）";
                         _viaChannel = true;
                         _viaChannelReason = _form.NsfwMode == 2 ? "只看 NSFW（需登录态）" : "NSFW 混合（需登录态）";
 
@@ -2878,6 +2876,45 @@ public class MainWindow : Window
                                                "然后在「关于」页点「NSFW 通道自检」确认。";
                         else if (facts.State == XmaLoginState.CloudflareChallenge)
                             _nsfwChannelWarn = "通道取到的是 Cloudflare 挑战页（不是真页面）→ 稍后重试；NSFW 可能不完整。";
+
+                        // ⭐ 通道拿到 0 条（实测过的两种成因：headless 被 Cloudflare 挑战、通道没登录）时，
+                        // **再试一次直连**。混合模式下直连拿不到 NSFW，但「有 SFW 结果 + 说明缺什么」
+                        // 远好过「一条都没有却不知道为什么」。直连也 0 条时才保留通道的诊断。
+                        if (result.Hits.Count == 0)
+                        {
+                            var channelWhy = EmptyResultDiagnosis.Describe(chHtmlOk, pageUrl);
+                            result.Diagnostic = channelWhy + "（走的是浏览器通道）";
+
+                            if (SearchRouting.ShouldFallbackToDirect(result.Hits.Count, cfg.AutoFallbackToBrowser))
+                            {
+                                _searchProgress.Enter(2, "通道 0 条 → 直连兜底");
+                                try
+                                {
+                                    var viaDirect = await client.SearchAsync(query, ct).ConfigureAwait(false);
+                                    if (viaDirect.Hits.Count > 0)
+                                    {
+                                        viaDirect.Diagnostic = string.Empty;
+                                        result = viaDirect;
+                                        _viaChannel = false;
+                                        _viaChannelReason = string.Empty;
+                                        _nsfwChannelWarn = "浏览器通道这次没取到结果，已自动改用直连 —— " +
+                                                           "本次**可能缺 NSFW 条目**。\n" +
+                                                           "通道那边的原因：" + channelWhy + "\n" +
+                                                           "去「关于」页点「NSFW 通道自检」确认通道是否已登录站点、是否被人机校验。";
+                                        _plugin.Jobs.Note($"搜索：通道 0 条 → 直连兜底拿到 {result.Hits.Count} 条");
+                                    }
+                                    else
+                                    {
+                                        _plugin.Jobs.Note("搜索：通道与直连都是 0 条 —— 站点确实没有匹配");
+                                    }
+                                }
+                                catch (Exception fbEx)
+                                {
+                                    // 直连也不行：保留通道的诊断，别把原因丢掉
+                                    _plugin.Jobs.Note("搜索：通道 0 条 → 直连兜底也失败：" + fbEx.Message);
+                                }
+                            }
+                        }
 
                         _plugin.Jobs.Note($"搜索（通道）取页面 {viaMs} ms + 解析 {parseSw.ElapsedMilliseconds} ms → {result.Hits.Count} 条｜{pageUrl}");
                     }
