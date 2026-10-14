@@ -62,6 +62,9 @@ public class MainWindow : Window
     /// <summary>站点一页固定 15 条（实测），用于算总页数。</summary>
     private const int SitePageSize = 15;
     private string _status = "留空关键词直接搜 = 看最新发布";
+
+    /// <summary>上一次搜索 0 条时的**原因**（来自 EmptyResultDiagnosis），有值就显示出来。</summary>
+    private string _searchDiag = string.Empty;
     // 加载进度（分段预估 + 已用时间；纯逻辑类，可离线自测）
     private LoadProgress _searchProgress = LoadProgress.ForSearch();
     private LoadProgress _detailProgress = LoadProgress.ForDetail();
@@ -286,6 +289,11 @@ public class MainWindow : Window
             ImGui.TextColored(Red, _error);
         else
             ImGui.TextColored(_busy ? Yellow : Green, _status);
+
+        // 0 条时把原因说清楚：是站点拦了、没登录、还是站点改版导致一条都没解析出来。
+        // 以前只显示「没有结果」，用户既不能自救、我也无从定位。
+        if (_searchDiag.Length > 0)
+            ImGui.TextColored(Yellow, "　↳ " + _searchDiag);
 
         if (_busy) DrawLoadProgress(_searchProgress, S(360f));
 
@@ -2736,6 +2744,7 @@ public class MainWindow : Window
         _selected = null;
         _detail = null;
         _searchProgress.Complete();
+        _searchDiag = _hits.Count == 0 ? result.Diagnostic : string.Empty;
         _status = _hits.Count == 0
             ? (fromCache ? "这一页没有结果（缓存）" : "这一页没有结果 —— 换个关键词，或放宽筛选")
             : $"已加载 {_hits.Count} 条 / 站点共 {_totalMods} 条" + (fromCache ? "（缓存，秒开）" : string.Empty);
@@ -2855,6 +2864,8 @@ public class MainWindow : Window
                         var parseSw = System.Diagnostics.Stopwatch.StartNew();
                         result = XmaParser.ParseSearch(chHtmlOk, query.Page, pageUrl);
                         parseSw.Stop();
+                        if (result.Hits.Count == 0)
+                            result.Diagnostic = EmptyResultDiagnosis.Describe(chHtmlOk, pageUrl) + "（走的是浏览器通道）";
                         _viaChannel = true;
                         _viaChannelReason = _form.NsfwMode == 2 ? "只看 NSFW（需登录态）" : "NSFW 混合（需登录态）";
 
@@ -2868,7 +2879,7 @@ public class MainWindow : Window
                         else if (facts.State == XmaLoginState.CloudflareChallenge)
                             _nsfwChannelWarn = "通道取到的是 Cloudflare 挑战页（不是真页面）→ 稍后重试；NSFW 可能不完整。";
 
-                        _plugin.Jobs.Note($"搜索（通道）取页面 {viaMs} ms + 解析 {parseSw.ElapsedMilliseconds} ms → {result.Hits.Count} 条");
+                        _plugin.Jobs.Note($"搜索（通道）取页面 {viaMs} ms + 解析 {parseSw.ElapsedMilliseconds} ms → {result.Hits.Count} 条｜{pageUrl}");
                     }
                     else
                     {
@@ -2891,7 +2902,7 @@ public class MainWindow : Window
                         result = await client.SearchAsync(query, ct).ConfigureAwait(false);
                         dSw.Stop();
                         _directBlocked.MarkHealthy();     // 直连通了 → 不用再绕
-                        _plugin.Jobs.Note($"搜索（直连）{dSw.ElapsedMilliseconds} ms → {result.Hits.Count} 条（总数 {result.TotalMods}）");
+                        _plugin.Jobs.Note($"搜索（直连）{dSw.ElapsedMilliseconds} ms → {result.Hits.Count} 条（总数 {result.TotalMods}）｜{pageUrl}");
                     }
                     catch (XmaAccessException directDenied) when (channel.Enabled && cfg.AutoFallbackToBrowser)
                     {
@@ -2907,6 +2918,8 @@ public class MainWindow : Window
 
                         _searchProgress.Enter(2, "解析");
                         result = XmaParser.ParseSearch(html, query.Page, pageUrl);
+                        if (result.Hits.Count == 0)
+                            result.Diagnostic = EmptyResultDiagnosis.Describe(html, pageUrl) + "（直连被拒后走的浏览器通道）";
                         _viaChannel = true;
                         _viaChannelReason = XmaBlockClassifier.ShortLabel(directDenied.Reason);
                     }

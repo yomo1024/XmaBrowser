@@ -44,7 +44,18 @@ public sealed class XmaClient : IDisposable
             var url = XmaUrls.Search(query);
             var html = await GetStringAsync(url, ct).ConfigureAwait(false);
             var result = XmaParser.ParseSearch(html, query.Page, url);
-            _log.Info($"搜索「{query.Text}」第 {query.Page} 页 → 解析到 {result.Hits.Count} 条（站点提示共 {result.TotalMods} 个 Mod）");
+            result.Url = url;
+
+            // 0 条时把**原因**查出来（页面像不像人机校验 / 未登录页 / 就是个空结果页）。
+            // 「搜不出来」不能只有一句「没有结果」—— 那样用户和我都无从下手。
+            if (result.Hits.Count == 0)
+            {
+                result.Diagnostic = EmptyResultDiagnosis.Describe(html, url);
+                _log.Warn($"[XmaBrowser] 搜索 0 条：{result.Diagnostic}");
+            }
+
+            _log.Info($"搜索「{query.Text}」第 {query.Page} 页 → 解析到 {result.Hits.Count} 条" +
+                      $"（站点提示共 {result.TotalMods} 个 Mod）｜{url}");
             return result;
         }, ct);
 

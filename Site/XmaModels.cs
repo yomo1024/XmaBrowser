@@ -119,7 +119,13 @@ public sealed class SearchQuery
     public int NsfwMode { get; set; }
 
     public bool OnlyDtCompatible { get; set; } = true;
-    public string SortBy { get; set; } = "time_published";
+    /// <summary>
+    /// 排序字段。**必须用站点下拉里的合法值**（实测：rank / time_edited / time_posted /
+    /// name_slug / views / views_today / downloads）。非法值站点**不报错**、静默回落到默认序 ——
+    /// 所以写错了会「看起来正常」但完全不受控（这里曾经用过不存在的 time_published）。
+    /// </summary>
+    public string SortBy { get; set; } = "time_posted";
+
     public string SortOrder { get; set; } = "desc";
     public int Page { get; set; } = 1;
 }
@@ -152,6 +158,12 @@ public sealed class SearchResult
     /// <summary>站点提示的 Mod 总数（读不到就是 0）。</summary>
     public int TotalMods { get; set; }
     public string Url { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 0 条结果时的**原因**（有值就说明站点确实回了 0 条，或回的不是搜索结果页）。
+    /// 用来把「搜不出来」从不可解释变成可解释 —— 用户拿这行字就能定位。
+    /// </summary>
+    public string Diagnostic { get; set; } = string.Empty;
 }
 
 /// <summary>详情页解析结果。</summary>

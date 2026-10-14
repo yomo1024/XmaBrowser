@@ -409,6 +409,34 @@ Console.WriteLine("=== 9d. 关键词默认按标题搜（name=）—— 别又�
     // 回归：默认值一旦被改成 true，就等于把「搜 Mod 名搜不到」这个 bug 放回来
     Check("表单默认 = 标题搜（不是全文）", !new SearchForm().TextAsFullText);
     Check("Reset 后仍是标题搜", !ResetIsFullText());
+    // 回归：SearchQuery 自己的默认排序也必须是站点合法值（它曾长期是非法值 time_published，
+    // 只有走 SearchForm 的界面才是对的，直接构造 SearchQuery 的调用方全在赌站点回退）
+    var legalSortNames = new[] { "rank", "time_edited", "time_posted", "name_slug", "views", "views_today", "downloads" };
+    Check("SearchQuery 默认排序是合法值",
+          legalSortNames.Contains(new SearchQuery().SortBy), new SearchQuery().SortBy);
+}
+
+Console.WriteLine();
+Console.WriteLine("=== 9e. 0 条时要说清原因（不能只有一句「没有结果」）===");
+{
+    var normalPage = Sample("search_page1.html");
+    var dNormal = EmptyResultDiagnosis.Describe(normalPage, "https://x/search?name=a");
+    Console.WriteLine("   正常列表页(15 张卡)： " + dNormal);
+    Check("页面有卡片却没解析出来 → 指出是解析/改版问题（而不是误报未登录）",
+          dNormal.Contains("卡片") && dNormal.Contains("解析"), dNormal);
+
+    var dTiny = EmptyResultDiagnosis.Describe("<html></html>", "https://x/search");
+    Check("页面异常小 → 指出可能被拦", dTiny.Contains("异常小"), dTiny);
+
+    var dEmpty = EmptyResultDiagnosis.Describe("", "https://x/search");
+    Check("站点没返回内容 → 明说没返回", dEmpty.Contains("没返回"), dEmpty);
+
+    var dNull = EmptyResultDiagnosis.Describe(null, "https://x/search");
+    Check("null 不抛异常", dNull.Length > 0);
+
+    Check("每种结论都带上实际请求的 URL（便于定位）",
+          dNormal.Contains("https://x/search?name=a") && dTiny.Contains("https://x/search"));
+    Check("可疑小页面的阈值有常量可查", EmptyResultDiagnosis.SuspiciouslySmallBytes > 1024);
 }
 
 static bool ResetIsFullText()
@@ -2326,6 +2354,19 @@ if (nameTestProbe)
     var fullHit = byFull.Hits.Any(h => h.Title.Contains("Bellissente"));
     Console.WriteLine($"   旧行为(basic_text=) → {byFull.Hits.Count} 条：{string.Join(" | ", byFull.Hits.Take(3).Select(h => h.Title))}");
     Console.WriteLine($"   对照结论：旧行为在这一页{(fullHit ? "也能找到" : "找不到它 —— 与主人反馈一致")}");
+
+    // 主人第二次报：只搜「Bellissente」、并且勾了全文搜，也搜不出来。
+    // 用**插件的真实默认参数**（OnlyDtCompatible=true、NsfwMode=0、sortby=time_posted）两组各跑一次，
+    // 看站点到底返回什么、以及插件解析出几条。
+    Console.WriteLine();
+    Console.WriteLine("   主人第二次报的用例（只搜 Bellissente）：");
+    foreach (var asFull in new[] { true, false })
+    {
+        var r = await nClient.SearchAsync(new SearchQuery { Text = "Bellissente", TextAsFullText = asFull, Page = 1 });
+        Console.WriteLine($"     全文={asFull} → 解析到 {r.Hits.Count} 条（站点总数标记 {r.TotalMods}）");
+        foreach (var h in r.Hits.Take(3)) Console.WriteLine($"         · {h.Title}  [{h.ModId}]");
+        Console.WriteLine($"         {r.Url}");
+    }
 }
 
 Console.WriteLine();

@@ -55,6 +55,7 @@
     <Compile Include="..\..\Ui\SearchForm.cs" />
     <Compile Include="..\..\Site\PackageIndex.cs" />
     <Compile Include="..\..\Site\TextSearch.cs" />
+    <Compile Include="..\..\Site\EmptyResultDiagnosis.cs" />
   </ItemGroup>
 
   <ItemGroup>
