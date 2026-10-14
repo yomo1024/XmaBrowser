@@ -27,6 +27,7 @@ var loginProbe = args.Contains("login");
 var perfProbe = args.Contains("perf");
 var imgProbe = args.Contains("imgprobe");
 var inspectProbe = args.Contains("inspect");
+var nameTestProbe = args.Contains("nametest");
 var adPerfProbe = args.Contains("adperf");
 var externalProbe = args.Contains("externals");
 var streamProbe = args.Contains("stream");
@@ -46,7 +47,11 @@ string Sample(string name) => File.ReadAllText(Path.Combine(AppContext.BaseDirec
 Console.WriteLine("=== 1. 搜索 URL 拼装 ===");
 var url = XmaUrls.Search(new SearchQuery { Text = "hair style", Page = 3, OnlyDtCompatible = true, Tags = "bibo" });
 Console.WriteLine("   " + url);
-Check("含 basic_text（并已转义空格）", url.Contains("basic_text=hair%20style"), url);
+// ⚠ 这条断言原本写的是 `basic_text=hair%20style` —— **那条断言锁住的正是后来报的 bug**：
+// 站点 basic_text= 是全文松散匹配，粘 Mod 全名会返回一堆杂项、翻几页都找不到要的那条。
+// 现在默认走 name=（标题里每个词都命中）。详见第 9d 节。
+Check("含 name=（标题检索，并已转义空格）", url.Contains("name=hair%20style"), url);
+Check("默认不发 basic_text=", !url.Contains("basic_text="), url);
 Check("含 page=3", url.Contains("page=3"), url);
 Check("含 dt_compat=1", url.Contains("dt_compat=1"), url);
 Check("含 nsfw=false", url.Contains("nsfw=false"), url);
@@ -361,6 +366,56 @@ Console.WriteLine("=== 9c. 装前看包：只读 zip 中央目录（不下载整
     var failedRes = PackageInspection.Failed("a.zip", ".zip", "被挡了");
     Check("探测失败时：Bytes=0 且 SizeKnown=false（界面显示「未知」而不是 0）",
           failedRes.Bytes == 0 && !failedRes.SizeKnown && !failedRes.HasListing);
+}
+
+Console.WriteLine();
+Console.WriteLine("=== 9d. 关键词默认按标题搜（name=）—— 别又改回 basic_text ===");
+{
+    // 实测复现（真站点，搜「Bellissente, a makeup for Aerin」）：
+    //   basic_text=（全文松散匹配）→ 15 条杂项，**翻到第 3 页都没有它**，换任何排序都一样
+    //   name=（标题里每个词都命中）→ **1 条，正是它，排第 1**
+    var titleQ = new SearchQuery { Text = "Bellissente, a makeup for Aerin" };
+    var titleUrl = XmaUrls.Search(titleQ);
+    Check("默认：关键词走 name=（标题检索）", titleUrl.Contains("name="), titleUrl);
+    Check("默认：不发 basic_text=", !titleUrl.Contains("basic_text="), titleUrl);
+    Check("Mod 全名被完整转义进去（含逗号与空格）",
+          titleUrl.Contains("name=Bellissente%2C%20a%20makeup%20for%20Aerin"), titleUrl);
+
+    var fullQ = new SearchQuery { Text = "tattoo", TextAsFullText = true };
+    var fullUrl = XmaUrls.Search(fullQ);
+    Check("只有显式开了全文，才发 basic_text=", fullUrl.Contains("basic_text=tattoo"), fullUrl);
+    Check("全文模式下不再额外发 name=（避免同名参数）", !fullUrl.Contains("name="), fullUrl);
+
+    // ⚠ 绝不发出两个同名参数：站点对重复 name= 的行为未验证，不能赌
+    var bothQ = new SearchQuery { Text = "aaa", Name = "bbb" };
+    var bothUrl = XmaUrls.Search(bothQ);
+    Check("关键词 + 名称 → 只发一个 name=",
+          System.Text.RegularExpressions.Regex.Matches(bothUrl, "name=").Count == 1, bothUrl);
+    Check("关键词 + 名称 → 两段词合进同一个 name=（AND 语义）",
+          bothUrl.Contains("name=aaa%20bbb"), bothUrl);
+
+    var nameOnly = new SearchQuery { Name = "bbb" };
+    Check("只填名称 → 也走 name=", XmaUrls.Search(nameOnly).Contains("name=bbb"), XmaUrls.Search(nameOnly));
+
+    var mixedUrl = XmaUrls.Search(new SearchQuery { Text = "tattoo", TextAsFullText = true, Name = "bbb" });
+    Check("全文 + 名称 → basic_text 与 name 各一个",
+          mixedUrl.Contains("basic_text=tattoo") && mixedUrl.Contains("name=bbb"), mixedUrl);
+
+    Check("空关键词不产生任何文本参数",
+          !XmaUrls.Search(new SearchQuery()).Contains("name=")
+          && !XmaUrls.Search(new SearchQuery()).Contains("basic_text="));
+
+    Check("界面说明非空", TextSearch.Describe(false).Length > 0 && TextSearch.Describe(true).Length > 0);
+    // 回归：默认值一旦被改成 true，就等于把「搜 Mod 名搜不到」这个 bug 放回来
+    Check("表单默认 = 标题搜（不是全文）", !new SearchForm().TextAsFullText);
+    Check("Reset 后仍是标题搜", !ResetIsFullText());
+}
+
+static bool ResetIsFullText()
+{
+    var f = new SearchForm { TextAsFullText = true };
+    f.Reset();
+    return f.TextAsFullText;
 }
 
 Console.WriteLine();
@@ -2245,6 +2300,32 @@ if (inspectProbe)
         Check($"装前看包({mid}) 拿到了真实大小", insp.SizeKnown, insp.SizeText);
         Check($"装前看包({mid}) 用时 < 10 秒（证明没偷偷下整包）", sw.ElapsedMilliseconds < 10_000, sw.ElapsedMilliseconds + " ms");
     }
+}
+
+if (nameTestProbe)
+{
+    // 复现主人报的问题：粘 Mod 全名到搜索框却搜不到（站点上搜得到）。
+    Console.WriteLine();
+    Console.WriteLine("=== 联网：复现「搜 Mod 名搜不到」 ===");
+    var nCache = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "nametest");
+    Directory.CreateDirectory(nCache);
+    using var nHttp = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
+    using var nClient = new XmaClient(nHttp, new TestSettings(), nCache, new NullLog());
+
+    const string reported = "Bellissente, a makeup for Aerin";
+
+    // 对照 A：修复后的默认行为 = 按标题搜（name=）
+    var byTitle = await nClient.SearchAsync(new SearchQuery { Text = reported, Page = 1 });
+    var titleHit = byTitle.Hits.Any(h => h.Title.Contains("Bellissente"));
+    Console.WriteLine($"   按标题(name=)     → {byTitle.Hits.Count} 条：{string.Join(" | ", byTitle.Hits.Take(3).Select(h => h.Title))}");
+    Check("修复后：粘 Mod 全名能搜到它", titleHit, byTitle.Url);
+
+    // 对照 B：旧行为 = 全文搜（basic_text=）。只打印不改判 —— 站点排序以后可能变，
+    // 把它写成硬断言会让构建莫名其妙地挂；但它正是当初"搜不到"的证据。
+    var byFull = await nClient.SearchAsync(new SearchQuery { Text = reported, Page = 1, TextAsFullText = true });
+    var fullHit = byFull.Hits.Any(h => h.Title.Contains("Bellissente"));
+    Console.WriteLine($"   旧行为(basic_text=) → {byFull.Hits.Count} 条：{string.Join(" | ", byFull.Hits.Take(3).Select(h => h.Title))}");
+    Console.WriteLine($"   对照结论：旧行为在这一页{(fullHit ? "也能找到" : "找不到它 —— 与主人反馈一致")}");
 }
 
 Console.WriteLine();

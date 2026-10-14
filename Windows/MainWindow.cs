@@ -330,7 +330,7 @@ public class MainWindow : Window
     {
         var avail = ImGui.GetContentRegionAvail().X;
         ImGui.SetNextItemWidth(MathF.Max(S(200f), avail - S(330f)));
-        ImGui.InputTextWithHint("##xma-kw", "关键词（留空 = 不看关键词）", ref _form.Text, 128);
+        ImGui.InputTextWithHint("##xma-kw", "关键词 / Mod 名（默认按标题精确搜）", ref _form.Text, 128);
         if (ImGui.IsItemDeactivatedAfterEdit()) StartSearch(1);
 
         ImGui.SameLine();
@@ -2646,6 +2646,18 @@ public class MainWindow : Window
         if (MathF.Abs(_s - 1f) > 0.001f) ImGui.SetWindowFontScale(_s);
 
         ImGui.TextColored(Dim, "留空 = 不看这个条件（除「关键词」外都是站点的精确检索项）");
+        ImGui.Separator();
+
+        // ---- 关键词的检索语义（对应主工具条那个「关键词 / Mod 名」框）----
+        ImGui.Checkbox("关键词按全文搜（连描述一起）", ref _form.TextAsFullText);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(
+                "默认**关** = 按标题搜（站点的 name=：标题里每个词都要命中）。\n" +
+                "粘一个 Mod 全名进去就能精确找到它 —— 推荐保持关闭。\n\n" +
+                "勾上 = 按全文搜（站点的 basic_text=：标题 + 描述，松散匹配）。\n" +
+                "常见词会把你要的 Mod 淹掉：实测搜「Bellissente, a makeup for Aerin」全名，\n" +
+                "全文搜返回一堆别的 makeup 且翻几页都找不到它，按标题搜则是第 1 条。");
+        ImGui.TextColored(Dim, TextSearch.Describe(_form.TextAsFullText));
         ImGui.Separator();
 
         var w = 330f;

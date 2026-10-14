@@ -50,6 +50,14 @@ public sealed class SearchForm
     /// <summary>把「关键词」这一栏当标签精确检索。</summary>
     public bool KeywordAsTag;
 
+    /// <summary>
+    /// 关键词按**全文**搜（连描述一起）。默认关 = 按**标题**搜。
+    /// 实测：站点 `basic_text=`（全文）是松散匹配，常见词会把要的 Mod 淹掉；
+    /// `name=`（标题）是「标题里每个词都命中」，粘一个 Mod 全名就能精确找到。
+    /// 所以默认标题，想连描述一起搜的人显式打开这个开关。
+    /// </summary>
+    public bool TextAsFullText;
+
     /// <summary>当前选中的排序项。索引越界自动夹取，永不抛。</summary>
     public (string Label, string Value, string Order) CurrentSort =>
         Sorts[Math.Clamp(SortIndex, 0, Sorts.Length - 1)];
@@ -64,6 +72,7 @@ public sealed class SearchForm
         SortBy = CurrentSort.Value,
         SortOrder = CurrentSort.Order,
         Text = KeywordAsTag ? string.Empty : Trim(Text),
+        TextAsFullText = TextAsFullText,
         Tags = KeywordAsTag ? Trim(Text) : Trim(Tags),
         Name = Trim(Name),
         Author = Trim(Author),
@@ -98,6 +107,7 @@ public sealed class SearchForm
         OnlyDtCompatible = true;
         NsfwMode = 0;
         KeywordAsTag = false;
+        TextAsFullText = false;
     }
 
     private static string Trim(string? s) => (s ?? string.Empty).Trim();

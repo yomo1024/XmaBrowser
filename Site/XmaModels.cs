@@ -50,10 +50,29 @@ public static class XmaUrls
 
         if (q.OnlyDtCompatible)
             parts.Add("dt_compat=1");
-        if (!string.IsNullOrWhiteSpace(q.Text))
-            parts.Add("basic_text=" + Uri.EscapeDataString(q.Text.Trim()));
-        if (!string.IsNullOrWhiteSpace(q.Name))
-            parts.Add("name=" + Uri.EscapeDataString(q.Name.Trim()));
+        // 文本检索：**默认按标题搜**（`name=`），只有显式开了全文才发 `basic_text=`。
+        // 实测：`basic_text=` 是全文松散匹配，"makeup"/"Aerin" 这类常见词会把真身淹掉
+        // （搜 Mod 全名返回 15 条杂项、翻到第 3 页都没有它）；`name=` 是「标题里每个词都命中」，
+        // 粘一个 Mod 全名就能精确拿到它。详见 TextSearch。
+        //
+        // ⚠ 绝不发出两个同名参数：标题检索时「关键词 + 名称」合并成一个 `name=`（= 词全都要命中）。
+        var boxText = (q.Text ?? string.Empty).Trim();
+        var nameText = (q.Name ?? string.Empty).Trim();
+
+        if (boxText.Length > 0 && q.TextAsFullText)
+        {
+            parts.Add(TextSearch.FullTextParam + "=" + Uri.EscapeDataString(boxText));
+            if (nameText.Length > 0)
+                parts.Add(TextSearch.TitleParam + "=" + Uri.EscapeDataString(nameText));
+        }
+        else
+        {
+            var title = boxText.Length > 0 && nameText.Length > 0
+                ? boxText + " " + nameText
+                : boxText.Length > 0 ? boxText : nameText;
+            if (title.Length > 0)
+                parts.Add(TextSearch.TitleParam + "=" + Uri.EscapeDataString(title));
+        }
         if (!string.IsNullOrWhiteSpace(q.Author))
             parts.Add("author=" + Uri.EscapeDataString(q.Author.Trim()));
         if (!string.IsNullOrWhiteSpace(q.Tags))
@@ -75,6 +94,14 @@ public static class XmaUrls
 public sealed class SearchQuery
 {
     public string Text { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 关键词是否按**全文**搜（`basic_text=`，标题 + 描述）。
+    /// false（默认）= 按**标题**搜（`name=`）—— 实测这才是「粘 Mod 全名能搜到」的那条路。
+    /// 详见 <see cref="TextSearch"/>。
+    /// </summary>
+    public bool TextAsFullText { get; set; }
+
     public string Name { get; set; } = string.Empty;
     public string Author { get; set; } = string.Empty;
     public string Tags { get; set; } = string.Empty;

@@ -54,6 +54,7 @@
     <Compile Include="..\..\Ui\GridLayout.cs" />
     <Compile Include="..\..\Ui\SearchForm.cs" />
     <Compile Include="..\..\Site\PackageIndex.cs" />
+    <Compile Include="..\..\Site\TextSearch.cs" />
   </ItemGroup>
 
   <ItemGroup>
