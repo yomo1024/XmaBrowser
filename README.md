@@ -2,8 +2,6 @@
 
 在游戏里逛 **XIVModArchive**：搜索、浏览、**点一下就装进 Penumbra 并即时生效**，不用切出游戏。
 
-> 独立的 Dalamud 插件，与「FFXIV XMA Manager」三件套互不依赖，也不需要管理器在运行。
-
 ## 安装
 
 Dalamud → 设置 → 实验性 → **自定义插件源**，粘贴：
@@ -61,31 +59,10 @@ https://cdn.jsdelivr.net/gh/yomo1024/XmaBrowser@main/pluginmaster-cdn.json
 「关于」页底部有**诊断日志**（最近 80 条），旁边可一键复制，直接贴给开发者即可；
 也可以 `/xllog` 打开 Dalamud 日志窗口。
 
-## 开发
+## 隐私与许可
 
-```bash
-export DALAMUD_HOME='<你的 Dalamud dev 引用库>'
-dotnet build -c Release XmaBrowser.csproj              # 验收口径：0 警告 0 错误
+只**读**站点公开数据；浏览器通道复制的是**你本机浏览器自己的** cookie，**不上传、不写日志**，临时 profile 用完即删；全流程不回传任何数据到第三方。
 
-cd tests/SiteTests && dotnet run -c Release            # 无游戏自测（离线，用真实 HTML 样本）
-cd tests/SiteTests && dotnet run -c Release -- live    # 联网实测
-cd tests/SiteTests && dotnet run -c Release -- inspect # 联网实测：装前看包
-```
+清洁室实现，未复制 `Noevain/ModArchiveBrowser`（AGPL-3.0）的代码。感谢 Penumbra、Dalamud、XIVModArchive 及其作者。
 
-测试项目直接 Include 插件源码，所以测的就是真东西。
-
-**目录结构、压缩包判定规则、浏览器通道原理、版本要点** → [docs/详细说明.md](docs/详细说明.md)
-
-## 隐私
-
-- 只**读**站点公开数据，除下载 Mod 包外不向站点发送任何内容。
-- 浏览器通道复制的是**你本机浏览器自己的** cookie 文件，只用于让浏览器取 NSFW 内容；
-  **不会被上传、不会被写入日志**。临时 profile 默认用完即删。
-- 全流程不回传任何数据到第三方。
-
-## 许可与致谢
-
-清洁室实现：接口配方（搜索参数、下载链接选择器、`/private/` 直链形态）来自对站点的公开实测，
-未复制 `Noevain/ModArchiveBrowser`（AGPL-3.0）的代码。
-
-感谢 Penumbra、Dalamud、XIVModArchive 以及它们各自的作者。
+开发构建、目录结构、压缩包判定规则、浏览器通道原理、版本要点 → [docs/详细说明.md](docs/详细说明.md)
