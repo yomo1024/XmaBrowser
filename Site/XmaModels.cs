@@ -73,8 +73,12 @@ public static class XmaUrls
             if (title.Length > 0)
                 parts.Add(TextSearch.TitleParam + "=" + Uri.EscapeDataString(title));
         }
-        if (!string.IsNullOrWhiteSpace(q.Author))
-            parts.Add("author=" + Uri.EscapeDataString(q.Author.Trim()));
+        // ⚠ 作者名里的撇号会把站点的匹配弄坏（实测 author=Helina's Bakery → 0 条，
+        //    换成 author=Helina s Bakery → 15 条）。**只清洗 author，不要碰 name** ——
+        //    标题侧是反的（name=Kitten's Rapture 正常，换成 Kitten s Rapture 反而 0 条）。
+        var authorQuery = AuthorQuery.Sanitize(q.Author);
+        if (authorQuery.Length > 0)
+            parts.Add("author=" + Uri.EscapeDataString(authorQuery));
         if (!string.IsNullOrWhiteSpace(q.Tags))
             parts.Add("tags=" + Uri.EscapeDataString(q.Tags.Trim()));
         if (!string.IsNullOrWhiteSpace(q.Races))

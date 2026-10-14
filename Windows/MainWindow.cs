@@ -899,6 +899,27 @@ public class MainWindow : Window
         return _hits.Where(h => FavoriteStore.IsFavorite(favs, h.ModId)).ToList();
     }
 
+    /// <summary>
+    /// 0 条时的出口。**标题里没有匹配 ≠ 站点上没有** —— 实测把作者名「Helina's Bakery」
+    /// 当关键词按标题搜是 0 条（那是作者名，不在任何标题里），改全文搜则有 15 条。
+    /// 与其让用户自己猜，不如直接给一个一键改全文的按钮。
+    /// </summary>
+    private void DrawEmptyActions()
+    {
+        if (_busy || _form.TextAsFullText) return;
+        if (_form.Text.Trim().Length == 0) return;
+
+        ImGui.Spacing();
+        if (ImGui.Button("改用全文搜索（连描述一起）##fulltext-suggest"))
+        {
+            _form.TextAsFullText = true;
+            StartSearch(1);
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("标题里没有匹配时，把关键词改成**全文检索**（标题 + 描述）再搜一次。\n" +
+                             "注意：全文搜是松散匹配，常见词会带出很多相关但未必完全对得上的 Mod。");
+    }
+
     private void DrawResultList()
     {
         var hits = VisibleHits();
@@ -909,6 +930,7 @@ public class MainWindow : Window
                 ImGui.TextColored(Dim, $"本页 {_hits.Count} 条里没有已收藏的 —— 取消下面的「只看收藏」看全部。");
             else
                 ImGui.TextColored(Dim, _busy ? "搜索中…" : "还没有结果。敲关键词回车，或直接点「搜索」看最新发布。");
+            DrawEmptyActions();
             return;
         }
 
@@ -1006,6 +1028,7 @@ public class MainWindow : Window
                 ImGui.TextColored(Dim, $"本页 {_hits.Count} 条里没有已收藏的 —— 取消「只看收藏」看全部。");
             else
                 ImGui.TextColored(Dim, _busy ? "搜索中…" : "还没有结果。敲关键词回车，或直接点「搜索」看最新发布。");
+            DrawEmptyActions();
             return;
         }
 
@@ -2833,7 +2856,9 @@ public class MainWindow : Window
                 if (_searchCache.TryGet(pageUrl, out var cached))
                 {
                     _searchProgress.Enter(0, "命中缓存");
-                    _plugin.Jobs.Note($"搜索缓存命中：{pageUrl[..Math.Min(80, pageUrl.Length)]}");
+                    // ⚠ 这里**不要截断 URL**：曾经只显示前 80 字符，主人看到的 `…&author=He`
+                    //    被误读成「搜索被截断成 He」。日志的用途就是让人核对实际请求了什么。
+                    _plugin.Jobs.Note($"搜索缓存命中：{pageUrl}");
                     if (append) ApplyAppend(cached, page, fromCache: true);
                     else ApplySearchResult(cached, page, fromCache: true);
                     return;

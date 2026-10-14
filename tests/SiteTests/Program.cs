@@ -455,6 +455,45 @@ static bool ResetIsFullText()
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 9f. 作者名里的撇号：只清洗 author，绝不动 name ===");
+{
+    // 实测（真站点）：
+    //   author=Helina's Bakery → 0 条；author=Helina&#39;s Bakery → 0 条；
+    //   **author=Helina s Bakery（撇号换空格）→ 15 条 ✓**
+    // 而标题侧是反的：name=Kitten's Rapture → 1 条 ✓、name=Kitten s Rapture → 0 条 ✗
+    // —— 所以这两个参数的清洗规则不能混。
+    Check("ASCII 撇号 → 空格", AuthorQuery.Sanitize("Helina's Bakery") == "Helina s Bakery",
+          AuthorQuery.Sanitize("Helina's Bakery"));
+    Check("弯撇号（U+2019，从网页复制多半是它）→ 空格",
+          AuthorQuery.Sanitize("Helina\u2019s Bakery") == "Helina s Bakery",
+          AuthorQuery.Sanitize("Helina\u2019s Bakery"));
+    Check("双引号 / 反引号也一起清掉",
+          AuthorQuery.Sanitize("a\"b`c") == "a b c", AuthorQuery.Sanitize("a\"b`c"));
+    Check("折叠连续空格 + 去首尾", AuthorQuery.Sanitize("  Helina's   Bakery  ") == "Helina s Bakery",
+          AuthorQuery.Sanitize("  Helina's   Bakery  "));
+    Check("全是坏字符 → 空串（宁可不发这个参数，也别发一个必然 0 条的值）",
+          AuthorQuery.Sanitize("'''") == "");
+    Check("空 / null 不抛", AuthorQuery.Sanitize("") == "" && AuthorQuery.Sanitize(null) == "");
+    Check("没坏字符时原样返回", AuthorQuery.Sanitize("Helina Bakery") == "Helina Bakery");
+    Check("HasContent 判定正确", AuthorQuery.HasContent("Helina") && !AuthorQuery.HasContent("'''"));
+
+    // URL 层：作者名带撇号时必须发清洗后的值
+    // （空格被 EscapeDataString 编成 %20 —— 实测站点两者都能正确解码，与插件其它参数保持一致）
+    var apostropheAuthor = XmaUrls.Search(new SearchQuery { Author = "Helina's Bakery" });
+    Check("作者撇号：URL 里发的是清洗后的值",
+          apostropheAuthor.Contains("author=Helina%20s%20Bakery"), apostropheAuthor);
+    Check("作者撇号：URL 里不再出现 %27", !apostropheAuthor.Contains("%27"), apostropheAuthor);
+
+    // ⚠ 反向回归：**标题侧绝不能被清洗**（清洗了反而把好的一起弄坏）
+    var apostropheTitle = XmaUrls.Search(new SearchQuery { Text = "Kitten's Rapture" });
+    Check("标题撇号：原样保留（name=Kitten%27s%20Rapture）",
+          apostropheTitle.Contains("name=Kitten%27s%20Rapture"), apostropheTitle);
+
+    Check("变化说明可选输出", AuthorQuery.DescribeIfChanged("Helina's").Contains("Helina s")
+                              && AuthorQuery.DescribeIfChanged("Helina") == "");
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 10. 封面：定位 / 注入包 / 真伪 WebP 判定 ===");
 var ctmp = Path.Combine(Path.GetTempPath(), "XmaBrowserCoverTests", Guid.NewGuid().ToString("n")[..8]);
 Directory.CreateDirectory(ctmp);
@@ -2404,6 +2443,19 @@ if (nameTestProbe)
         Console.WriteLine($"         界面状态机 → 最终列表 {uiList.Count} 条（到底={simRes.End}：{simRes.Reason}）");
         Check($"界面最终列表非空（走一遍 StreamState，全文={asFull}）", uiList.Count > 0,
               $"解析 {r.Hits.Count} 条 → 界面 {uiList.Count} 条");
+    }
+
+    // 主人第三次报的用例：作者名里带撇号（Helina's Bakery）。
+    // 实测撇号会把站点的作者匹配弄坏（author=Helina's Bakery → 0 条），改成空格就好。
+    Console.WriteLine();
+    Console.WriteLine("   作者名带撇号的用例：");
+    foreach (var rawAuthor in new[] { "Helina's Bakery", "Helina" })
+    {
+        var aq = new SearchQuery { Author = rawAuthor, Page = 1 };
+        var ar = await nClient.SearchAsync(aq);
+        Console.WriteLine($"     author=\"{rawAuthor}\" → {ar.Hits.Count} 条｜{ar.Url}");
+        Console.WriteLine($"        {string.Join(" | ", ar.Hits.Take(2).Select(h => h.Title))}");
+        Check($"作者搜索拿得到结果（{rawAuthor}）", ar.Hits.Count > 0, ar.Url);
     }
 }
 
