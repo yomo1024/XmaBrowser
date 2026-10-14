@@ -124,7 +124,7 @@ public sealed class XmaClient : IDisposable
         return text;
     }
 
-    private HttpRequestMessage BuildRequest(string url)
+    private HttpRequestMessage BuildRequest(string url, string? range = null)
     {
         var req = new HttpRequestMessage(HttpMethod.Get, url);
         // 这套头是本机实测过的：站点把这种请求当同源 XHR，公开内容一律 200
@@ -133,7 +133,137 @@ public sealed class XmaClient : IDisposable
         req.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
         req.Headers.TryAddWithoutValidation("Accept", "text/html,application/json,*/*");
         req.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
+        // 装前看包要用 Range 只取几十 KB（实测站点支持，返回 206 + Content-Range）
+        if (!string.IsNullOrEmpty(range))
+            req.Headers.TryAddWithoutValidation("Range", range);
         return req;
+    }
+
+    /// <summary>Range 单次最多取多少字节 —— 防站点忽略 Range 时把整包吐回来。</summary>
+    private const int MaxRangeBytes = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// 装前看包：**不下载整包**，只用 1~3 次 Range 请求问出真实大小，
+    /// 并对 zip 家族（.zip / .pmp / .ttmp2 —— 实测三者都是 zip 容器）列出包内清单。
+    ///
+    /// 设计原则：**绝不把失败变成假数据**。列不出来就如实写清原因，
+    /// 界面对 .7z/.rar 照实显示「只能看大小」。
+    /// </summary>
+    public async Task<PackageInspection> InspectPackageAsync(string url, CancellationToken ct = default)
+    {
+        var fileName = FileNameOf(url);
+        var ext = PackageIndex.ExtensionOf(url);
+
+        try
+        {
+            var total = await ProbeSizeAsync(url, ct).ConfigureAwait(false);
+            if (total <= 0)
+                return PackageInspection.Failed(fileName, ext, "站点没给出文件大小（可能被挡了，稍后再试）");
+
+            if (!PackageIndex.IsZipFamily(ext))
+                return PackageInspection.SizeOnly(fileName, ext, total,
+                    PackageIndex.IsKnownNonZipArchive(ext)
+                        ? $"{ext} 不是 zip 容器，下载前列不出内容"
+                        : "这种格式没验证过，下载前列不出内容");
+
+            var tailStart = Math.Max(0, total - PackageIndex.TailProbeBytes);
+            var tail = await GetRangeAsync(url, tailStart, total - 1, ct).ConfigureAwait(false);
+            if (tail is null || !PackageIndex.TryFindEocd(tail, tailStart, out var cdOff, out var cdSize, out _))
+                return PackageInspection.SizeOnly(fileName, ext, total, "这个包读不出 zip 目录，下载前列不出内容");
+
+            byte[]? central = null;
+            var rel = cdOff - tailStart;
+            if (rel >= 0 && rel + cdSize <= tail.Length)
+                central = tail.AsSpan((int)rel, (int)cdSize).ToArray();
+            else if (cdSize > 0 && cdSize <= MaxRangeBytes)
+                central = await GetRangeAsync(url, cdOff, cdOff + cdSize - 1, ct).ConfigureAwait(false);
+
+            if (central is null || central.Length == 0)
+                return PackageInspection.SizeOnly(fileName, ext, total, "找到了 zip 目录的位置但取不回来，下载前列不出内容");
+
+            var entries = PackageIndex.ParseCentral(central);
+            if (entries.Count == 0)
+                return PackageInspection.SizeOnly(fileName, ext, total, "zip 目录里没有可读条目，下载前列不出内容");
+
+            var summary = PackageIndex.Summarize(total, fileName, entries);
+            _log.Info($"[XmaBrowser] 装前看包 {fileName}：{summary.SizeText}，" +
+                      $"{summary.EntryCount} 个条目，内含 {summary.ModCount} 个 mod");
+            return PackageInspection.Listed(summary);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception e)
+        {
+            _log.Warn($"[XmaBrowser] 装前看包失败（不影响安装）：{e.Message}");
+            return PackageInspection.Failed(fileName, ext, "探测失败：" + e.Message);
+        }
+    }
+
+    /// <summary>
+    /// 只为问大小：Range 0-0 拿 Content-Range 里的总长；站点不支持 Range 时退回 Content-Length。
+    /// **非 200/206 一律返回 0** —— 否则会把 Cloudflare 挑战页的长度当成 mod 大小。
+    /// </summary>
+    private async Task<long> ProbeSizeAsync(string url, CancellationToken ct)
+    {
+        using var req = BuildRequest(url, "bytes=0-0");
+        using var resp = await SendThrottledAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+
+        var code = (int)resp.StatusCode;
+        if (code is not (200 or 206)) return 0;
+
+        if (code == 206 && resp.Content.Headers.ContentRange?.Length is { } len && len > 0) return len;
+        return resp.Content.Headers.ContentLength is { } cl && cl > 0 ? cl : 0;
+    }
+
+    /// <summary>
+    /// 取一段字节。**只接受 206**：站点若忽略 Range 直接回 200，就是打算把整包吐出来 ——
+    /// 立刻放弃，绝不为了看清单而下载整包。
+    /// </summary>
+    private async Task<byte[]?> GetRangeAsync(string url, long from, long to, CancellationToken ct)
+    {
+        if (to < from) return null;
+        var want = to - from + 1;
+        if (want <= 0 || want > MaxRangeBytes) return null;
+
+        using var req = BuildRequest(url, $"bytes={from}-{to}");
+        using var resp = await SendThrottledAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+
+        if ((int)resp.StatusCode != 206)
+        {
+            _log.Warn($"[XmaBrowser] Range 未生效（HTTP {(int)resp.StatusCode}）→ 不列包内内容");
+            return null;
+        }
+
+        await using var src = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        var buf = new byte[want];
+        var got = 0;
+        while (got < want)
+        {
+            var n = await src.ReadAsync(buf.AsMemory(got, (int)(want - got)), ct).ConfigureAwait(false);
+            if (n <= 0) break;
+            got += n;
+        }
+
+        if (got == 0) return null;
+        return got == want ? buf : buf[..got];
+    }
+
+    /// <summary>从 URL 里取文件名（给界面显示）。取不到就退回原串尾部。</summary>
+    private static string FileNameOf(string url)
+    {
+        try
+        {
+            var path = new Uri(url).AbsolutePath;
+            var slash = path.LastIndexOf('/');
+            return Uri.UnescapeDataString(slash >= 0 ? path[(slash + 1)..] : path);
+        }
+        catch
+        {
+            var slash = url.LastIndexOf('/');
+            return slash >= 0 ? url[(slash + 1)..] : url;
+        }
     }
 
     private async Task<HttpResponseMessage> SendThrottledAsync(HttpRequestMessage req,

@@ -52,6 +52,8 @@
     <Compile Include="..\..\Ui\CacheMaintenance.cs" />
     <Compile Include="..\..\Ui\StreamState.cs" />
     <Compile Include="..\..\Ui\GridLayout.cs" />
+    <Compile Include="..\..\Ui\SearchForm.cs" />
+    <Compile Include="..\..\Site\PackageIndex.cs" />
   </ItemGroup>
 
   <ItemGroup>

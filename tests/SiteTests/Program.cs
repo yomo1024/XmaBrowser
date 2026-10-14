@@ -26,6 +26,7 @@ var detailProbe = args.Contains("detailtime");
 var loginProbe = args.Contains("login");
 var perfProbe = args.Contains("perf");
 var imgProbe = args.Contains("imgprobe");
+var inspectProbe = args.Contains("inspect");
 var adPerfProbe = args.Contains("adperf");
 var externalProbe = args.Contains("externals");
 var streamProbe = args.Contains("stream");
@@ -252,6 +253,114 @@ try
 finally
 {
     try { Directory.Delete(tmp, true); } catch { /* 忽略 */ }
+}
+
+Console.WriteLine();
+Console.WriteLine("=== 9b. 排序选项：每个值都必须是站点认的合法值 ===");
+{
+    // 站点搜索页下拉里的合法值（实测抄下来的），别凭印象加
+    var legalSorts = new[] { "rank", "time_edited", "time_posted", "name_slug", "views", "views_today", "downloads" };
+    Check("排序选项非空", SearchForm.Sorts.Length > 0);
+    Check("排序没有重复值", SearchForm.Sorts.Select(s => s.Value).Distinct().Count() == SearchForm.Sorts.Length);
+    foreach (var (label, value, order) in SearchForm.Sorts)
+    {
+        Check($"排序「{label}」的值 {value} 是站点合法值", legalSorts.Contains(value), value);
+        Check($"排序「{label}」的方向合法", order is "asc" or "desc", order);
+    }
+
+    Check("默认排序 = 最新发布(time_posted)", SearchForm.Sorts[0].Value == "time_posted");
+    // 回归：站点对非法 sortby **不报错**，而是静默回落到默认序 —— 写错了会静默失去控制
+    Check("不再出现站点不认的 time_published", SearchForm.Sorts.All(s => s.Value != "time_published"));
+
+    var uiSort = new SearchForm { SortIndex = 5 };            // 名称（自然升序）
+    var sortUrl = XmaUrls.Search(uiSort.ToQuery(1));
+    Check("拼出的 URL 带 sortby=name_slug", sortUrl.Contains("sortby=name_slug"), sortUrl);
+    Check("拼出的 URL 带 sortorder=asc", sortUrl.Contains("sortorder=asc"), sortUrl);
+
+    var over = new SearchForm { SortIndex = 999 };           // 越界不得抛
+    Check("排序索引越界自动夹取，不抛", over.ToQuery(1).SortBy == "rank", over.ToQuery(1).SortBy);
+}
+
+Console.WriteLine();
+Console.WriteLine("=== 9c. 装前看包：只读 zip 中央目录（不下载整包）===");
+{
+    // ① 扩展名判定：实测 .zip / .pmp / .ttmp2 三种**都是** zip 容器
+    Check("zip 家族：.zip（带查询串也认）", PackageIndex.IsZipFamily("https://x/a.zip?token=1"));
+    Check("zip 家族：.pmp", PackageIndex.IsZipFamily("/private/u/files/Mod.pmp"));
+    Check("zip 家族：.ttmp2（实测是 zip）", PackageIndex.IsZipFamily("Tight%26Firm.ttmp2"));
+    Check("zip 家族：.7z 不算", !PackageIndex.IsZipFamily("a.7z"));
+    Check("zip 家族：.rar 不算", !PackageIndex.IsZipFamily("a.rar"));
+    Check("明确非 zip：.7z/.rar 能被认出来（界面据此降级）",
+          PackageIndex.IsKnownNonZipArchive("a.7z") && PackageIndex.IsKnownNonZipArchive("b.RAR"));
+    Check("扩展名大小写不敏感", PackageIndex.ExtensionOf("A.PMP") == ".pmp", PackageIndex.ExtensionOf("A.PMP"));
+    // 回归：`ExtensionOf` 曾被写成只认「文件名」不认「裸扩展名」，导致拿扩展名回头再判一遍时
+    // 全部判成 unrecognized（联网探针抓到的真 bug，别改回去）
+    Check("裸扩展名也能被认出（.zip 回判必须为真）", PackageIndex.IsZipFamily(".zip"));
+    Check("裸扩展名：.pmp / .ttmp2 回判为真", PackageIndex.IsZipFamily(".pmp") && PackageIndex.IsZipFamily(".ttmp2"));
+    Check("裸扩展名：.rar 回判为「非 zip 压缩包」", PackageIndex.IsKnownNonZipArchive(".rar"));
+    Check("裸扩展名：无扩展名不误判", !PackageIndex.IsZipFamily("Mod") && !PackageIndex.IsKnownNonZipArchive("Mod"));
+
+    // ② 现场造一个真 zip（含两个内嵌 .pmp）→ 找 EOCD → 解析中央目录 → 摘要，整条链路往返
+    var zms = new MemoryStream();
+    using (var za = new ZipArchive(zms, ZipArchiveMode.Create, true))
+    {
+        void AddEntry(string name, string text)
+        {
+            var e = za.CreateEntry(name, CompressionLevel.Optimal);
+            using var w = new StreamWriter(e.Open());
+            w.Write(text);
+        }
+        AddEntry("tiramisu2 [Miqo Ear Jiggle + Tail V1].pmp", "fake-pmp-1");
+        AddEntry("tiramisu2 [Physics].pmp", "fake-pmp-2");
+        AddEntry("readme.txt", "hello");
+    }
+    var zbytes = zms.ToArray();
+    var zTailOff = Math.Max(0, zbytes.Length - PackageIndex.TailProbeBytes);
+    var zTail = zbytes.AsSpan((int)zTailOff).ToArray();
+
+    Check("EOCD 找到了", PackageIndex.TryFindEocd(zTail, zTailOff, out var cdOff, out var cdSize, out var cnt));
+    Check("EOCD 里的条目数 = 3", cnt == 3, $"cnt={cnt}");
+    Check("中央目录大小 > 0", cdSize > 0, $"cdSize={cdSize}");
+
+    var cd = zbytes.AsSpan((int)cdOff, (int)cdSize).ToArray();
+    var zEntries = PackageIndex.ParseCentral(cd);
+    Check("中央目录解析出 3 条", zEntries.Count == 3, $"got {zEntries.Count}");
+    Check("条目名与原名完全一致（空格/方括号）",
+          zEntries.Any(e => e.Name == "tiramisu2 [Miqo Ear Jiggle + Tail V1].pmp"));
+    Check("未压缩大小被读出（fake-pmp-1 = 10 字节）",
+          zEntries.First(e => e.Name.EndsWith("V1].pmp")).UncompressedSize == 10,
+          zEntries.First(e => e.Name.EndsWith("V1].pmp")).UncompressedSize.ToString());
+
+    var zSum = PackageIndex.Summarize(zbytes.Length, "a.zip", zEntries);
+    Check("摘要认出 2 个内嵌 mod（这就是「点安装会装进去几个」）", zSum.ModCount == 2, $"ModCount={zSum.ModCount}");
+    Check("摘要里的总字节 = 实际字节数", zSum.Bytes == zbytes.Length);
+    Check("摘要里未压缩总量 > 0", zSum.UncompressedBytes > 0);
+
+    // ③ 退化输入绝不能抛（界面会拿任意响应喂进来）
+    Check("尾部太短 → 返回 false，不抛", !PackageIndex.TryFindEocd(new byte[5], 0, out _, out _, out _));
+    Check("不是 zip → 返回 false，不抛",
+          !PackageIndex.TryFindEocd(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 },
+                                    0, out _, out _, out _));
+    Check("空中央目录 → 0 条，不抛", PackageIndex.ParseCentral(Array.Empty<byte>()).Count == 0);
+    Check("垃圾字节 → 立刻停下（宁可少列也不乱列）",
+          PackageIndex.ParseCentral(new byte[] { 0x67, 0x61, 0x72, 0x62, 0x61, 0x67, 0x65 }).Count == 0);
+    Check("片段截断的中央目录不越界",
+          PackageIndex.ParseCentral(cd.AsSpan(0, Math.Max(1, cd.Length / 3)).ToArray()).Count >= 0);
+
+    // ④ 大小格式化
+    Check("大小：0 → ?（绝不显示成 0）", PackageIndex.HumanSize(0) == "?");
+    Check("大小：48.22 MB", PackageIndex.HumanSize(50_557_602) == "48.22 MB", PackageIndex.HumanSize(50_557_602));
+    Check("大小：GB 档", PackageIndex.HumanSize(258_000_000_000).EndsWith(" GB"), PackageIndex.HumanSize(258_000_000_000));
+
+    // ⑤ 结果对象的不变量：**列不出内容时绝不能假装有数据**
+    var onlySizeRes = PackageInspection.SizeOnly("a.7z", ".7z", 86_000_000, "不是 zip 容器");
+    Check("只拿到大小时：HasListing=false", !onlySizeRes.HasListing);
+    Check("只拿到大小时：SizeKnown=true", onlySizeRes.SizeKnown);
+    Check("只拿到大小时：大小格式化正确", onlySizeRes.SizeText == "82.02 MB", onlySizeRes.SizeText);
+
+    var failedRes = PackageInspection.Failed("a.zip", ".zip", "被挡了");
+    Check("探测失败时：Bytes=0 且 SizeKnown=false（界面显示「未知」而不是 0）",
+          failedRes.Bytes == 0 && !failedRes.SizeKnown && !failedRes.HasListing);
 }
 
 Console.WriteLine();
@@ -2104,6 +2213,38 @@ if (streamProbe)
     Check("真实站点：三页之间没有重复（去重生效）", st.Loaded >= 15, st.Loaded.ToString());
     Check("真实站点：页号正常推进", st.NextPage > 1, st.NextPage.ToString());
     Check("真实站点：没误判到底", !st.End || st.EndReason.Length > 0, st.EndReason);
+}
+
+if (inspectProbe)
+{
+    // 对着**真站点**验证「装前看包」整条链路：详情页 → 下载直链 → Range 200 字节问大小
+    // → Range 256 KB 读 zip 中央目录 → 列出包内清单。全程**不下载整包**。
+    Console.WriteLine();
+    Console.WriteLine("=== 联网：装前看包（Range 只取几十 KB，绝不下载整包）===");
+    var iCache = Path.Combine(Path.GetTempPath(), "XmaBrowserTests", "inspect");
+    Directory.CreateDirectory(iCache);
+    using var iHttp = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
+    using var iClient = new XmaClient(iHttp, new TestSettings(), iCache, new NullLog());
+
+    // 实测挑出来的四种形态：.ttmp2（258 MB，zip 容器）/ .pmp（zip）/ .zip（内含 4 个 pmp）/ .rar（列不出）
+    foreach (var mid in new[] { "95080", "67543", "107423", "47778" })
+    {
+        var inspDet = await iClient.DetailAsync(mid);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var insp = await iClient.InspectPackageAsync(inspDet.AbsoluteDownloadUrl);
+        sw.Stop();
+
+        Console.WriteLine($"   modid {mid} → {insp.FileName}（{insp.Extension}）");
+        Console.WriteLine($"      大小 {insp.SizeText}｜用时 {sw.ElapsedMilliseconds} ms｜能列内容 = {insp.HasListing}");
+        if (insp.Summary is { } sum)
+            Console.WriteLine($"      条目 {sum.EntryCount} 个｜内含 mod {sum.ModCount} 个：{string.Join("、", sum.InnerModPacks.Take(4))}" +
+                              $"｜顶层：{string.Join("、", sum.TopPaths.Take(5))}");
+        else if (insp.Note.Length > 0)
+            Console.WriteLine($"      说明：{insp.Note}");
+
+        Check($"装前看包({mid}) 拿到了真实大小", insp.SizeKnown, insp.SizeText);
+        Check($"装前看包({mid}) 用时 < 10 秒（证明没偷偷下整包）", sw.ElapsedMilliseconds < 10_000, sw.ElapsedMilliseconds + " ms");
+    }
 }
 
 Console.WriteLine();

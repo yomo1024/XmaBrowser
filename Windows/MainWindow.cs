@@ -94,6 +94,11 @@ public class MainWindow : Window
     private SearchHit? _selected;
     private ModDetail? _detail;
     private bool _detailBusy;
+
+    // ---- 装前看包（只对当前详情生效；换 Mod 即作废）----
+    private PackageInspection? _pkgProbe;
+    private bool _pkgProbeBusy;
+    private string _pkgProbeModId = string.Empty;
     private int _previewIndex;
 
     // ---- 翻译状态 ----
@@ -1516,6 +1521,90 @@ public class MainWindow : Window
         }
         ImGui.SameLine();
         if (ImGui.Button("复制下载链接")) ImGui.SetClipboardText(d.AbsoluteDownloadUrl);
+
+        DrawPackageProbe(d);
+    }
+
+    /// <summary>
+    /// 装前看包：先看清「多大、里面是什么、装进去几个 mod」，再决定装不装。
+    /// **不下载整包** —— 只发几次 Range 请求（实测约 0.25 MB / 2~4 秒，
+    /// 对比下整包 48 MB / 95 秒）。
+    /// </summary>
+    private void DrawPackageProbe(ModDetail d)
+    {
+        // 换了一条 Mod → 上一条的探测结果作废（绝不能把 A 的包内容显示在 B 下面）
+        if (!string.Equals(_pkgProbeModId, d.ModId, StringComparison.Ordinal))
+        {
+            _pkgProbe = null;
+            _pkgProbeModId = string.Empty;
+        }
+
+        ImGui.SameLine();
+        ImGui.BeginDisabled(_pkgProbeBusy);
+        if (ImGui.Button(_pkgProbeBusy ? "探测中…" : "查看包内内容")) StartPackageProbe(d);
+        ImGui.EndDisabled();
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("不下载整包：只发几次 Range 请求（约 0.25 MB），读出真实大小与包内清单。\n" +
+                             ".zip / .pmp / .ttmp2 能列出内容；.7z / .rar 只能看大小。");
+
+        var p = _pkgProbe;
+        if (p is null) return;
+
+        ImGui.Spacing();
+        ImGui.TextColored(Blue, $"包内内容 · {p.FileName}");
+        ImGui.TextWrapped($"真实大小：{(p.SizeKnown ? p.SizeText : "未知")}");
+
+        if (p.Summary is { } s)
+        {
+            ImGui.TextWrapped($"共 {s.EntryCount} 个条目，解压后约 {s.UncompressedText}");
+            if (s.ModCount > 0)
+                ImGui.TextWrapped($"内含 {s.ModCount} 个 Mod：" + string.Join("、", s.InnerModPacks.Take(6)));
+            else
+                ImGui.TextColored(Dim, "（这个包本身就是一条 Mod，没有嵌套）");
+            if (s.TopPaths.Count > 0)
+                ImGui.TextColored(Dim, "顶层：" + string.Join("　", s.TopPaths.Take(8)));
+        }
+        else if (p.Note.Length > 0)
+        {
+            ImGui.TextColored(Dim, p.Note);
+        }
+    }
+
+    /// <summary>
+    /// 装前看包：**整条链路（Range 请求 + 解析）都在后台**，绝不在渲染线程上跑。
+    /// 失败绝不影响安装 —— 只把原因照实写出来。
+    /// </summary>
+    private void StartPackageProbe(ModDetail d)
+    {
+        if (_pkgProbeBusy) return;
+
+        _pkgProbe = null;
+        _pkgProbeBusy = true;
+        _pkgProbeModId = d.ModId;
+
+        var url = d.AbsoluteDownloadUrl;
+        var modId = d.ModId;
+        var client = _plugin.Site;
+
+        _ = Task.Run(async () =>
+        {
+            PackageInspection result;
+            try
+            {
+                result = await client.InspectPackageAsync(url).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                result = PackageInspection.Failed(string.Empty, string.Empty, "探测失败：" + e.Message);
+            }
+
+            _pkgProbeBusy = false;
+
+            // 只有用户还停在这条 Mod 上才把结果放上去（换走了就丢掉，别串台）
+            if (string.Equals(_pkgProbeModId, modId, StringComparison.Ordinal))
+                _pkgProbe = result;      // 引用赋值是原子的：渲染线程只会看到「旧」或「新」
+        });
     }
 
     // ==================================================================== 翻译
