@@ -1241,6 +1241,24 @@ Console.WriteLine("=== 13p. 流式加载状态机（去重 / 到底判据 / 别�
     var full = t.Append([.. Enumerable.Range(1, 15).Select(i => H("m" + i))], 15);
     Check("加载数达到站点总数 → 到底", full.End && t.Loaded == 15, t.EndReason);
 
+    // ⚠⚠ 回归：**首屏就到底时，这一页的条目必须照样交出来**。
+    // 曾经 Stop() 返回空列表 → 站点只有 1 条结果时首屏 _hits 变空 → 列表一片空白，
+    // 也就是「结果不足一页（≤15 条）的搜索全都显示不出来」——搜具体 Mod 名必中。
+    // 原来的断言只查了 End、没查条目，所以放跑了它。「到头」= 不用再翻页，≠ 这一页不要了。
+    Check("到站点总数时：这一页的条目仍要交出来", full.NewItems.Count == 15, full.NewItems.Count.ToString());
+
+    var one = new StreamState();
+    one.Reset(1, 1);
+    var oneRes = one.Append([H("only")], 1);
+    Check("只有 1 条结果时：到头的**同时**必须带回那 1 条（曾经的空白 bug）",
+          oneRes.End && oneRes.NewItems.Count == 1 && oneRes.NewItems[0].ModId == "only",
+          $"End={oneRes.End} New={oneRes.NewItems.Count}");
+    Check("到头原因仍写明是到站点总数", oneRes.Reason.Contains("站点总数"), oneRes.Reason);
+
+    // 唯一允许「空手而回」的情况是空页（那一页本来就没有条目）
+    Check("只有空页那种情况才允许交回空列表",
+          empty.NewItems.Count == 0 && empty.End && empty.Reason.Contains("空"), empty.Reason);
+
     // 没有 ModId 的条目要跳过（详情/原页面链接都靠它，留着没用）
     var bad = new StreamState();
     bad.Reset(1, 0);
@@ -1252,6 +1270,7 @@ Console.WriteLine("=== 13p. 流式加载状态机（去重 / 到底判据 / 别�
     deep.Reset(StreamState.MaxPage, 0);
     var deepRes = deep.Append([H("z1")], 0);
     Check("页号超过硬上限就停（别把站点翻穿）", deepRes.End, deep.EndReason);
+    Check("页号硬上限触发时也要交出这一页的条目", deepRes.NewItems.Count == 1, deepRes.NewItems.Count.ToString());
 
     // Reset 要清干净（新搜索不能沿用旧的去重集合）
     var rt = new StreamState();
@@ -2374,6 +2393,17 @@ if (nameTestProbe)
         Console.WriteLine($"     全文={asFull} → 解析到 {r.Hits.Count} 条（站点总数标记 {r.TotalMods}）");
         foreach (var h in r.Hits.Take(3)) Console.WriteLine($"         · {h.Title}  [{h.ModId}]");
         Console.WriteLine($"         {r.Url}");
+
+        // ⭐ 像界面一样再走一遍**流式状态机** —— 只验「解析到几条」是不够的：
+        // 曾经解析出 1 条，却被 StreamState 的「到底」分支丢掉，界面一片空白。
+        // 这一步就是当初漏掉的那一环。
+        var sim = new StreamState();
+        sim.Reset(1, r.TotalMods);
+        var simRes = sim.Append(r.Hits, r.TotalMods);
+        var uiList = simRes.NewItems.ToList();
+        Console.WriteLine($"         界面状态机 → 最终列表 {uiList.Count} 条（到底={simRes.End}：{simRes.Reason}）");
+        Check($"界面最终列表非空（走一遍 StreamState，全文={asFull}）", uiList.Count > 0,
+              $"解析 {r.Hits.Count} 条 → 界面 {uiList.Count} 条");
     }
 }
 

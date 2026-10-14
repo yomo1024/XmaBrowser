@@ -84,14 +84,14 @@ public sealed class StreamState
 
         // ① 站点给了空页：说明真的到底了
         if (pageItems.Count == 0)
-            return Stop("站点没有更多了（这一页是空的）");
+            return Stop("站点没有更多了（这一页是空的）", fresh);
 
         // ② 整页都是见过的：给它几次机会，连续几页如此就当到底
         if (fresh.Count == 0)
         {
             NoProgressStrikes++;
             if (NoProgressStrikes >= MaxNoProgressStrikes)
-                return Stop($"连续 {NoProgressStrikes} 页都是已看过的内容，先停在这里");
+                return Stop($"连续 {NoProgressStrikes} 页都是已看过的内容，先停在这里", fresh);
 
             NextPage++;
             return new AppendResult(fresh, false, string.Empty);
@@ -102,20 +102,29 @@ public sealed class StreamState
 
         // ③ 已经加载到站点声明的总数
         if (Total > 0 && Loaded >= Total)
-            return Stop($"已经到站点总数（{Total} 条）了");
+            return Stop($"已经到站点总数（{Total} 条）了", fresh);
 
         // ④ 页号硬上限（判据出问题时的保险，别把站点翻穿）
         if (NextPage > MaxPage)
-            return Stop("翻得太深了，先停在这里");
+            return Stop("翻得太深了，先停在这里", fresh);
 
         return new AppendResult(fresh, false, string.Empty);
     }
 
-    private AppendResult Stop(string reason)
+    /// <summary>
+    /// 收尾并标记「到头了」。
+    ///
+    /// ⚠⚠ **必须把这一页真正的新条目一起带回去**（<paramref name="fresh"/>）。
+    /// 曾经这里返回空列表，导致：站点只有 1 条结果时，第一页就满足 `Loaded >= Total` → 走这里 →
+    /// 刚解析出来的条目被丢掉 → 首屏 `_hits` 变成空 → **列表一片空白**。
+    /// 也就是说「结果不足一页（≤15 条）的搜索」全都会显示不出来（搜具体 Mod 名必中）。
+    /// 「到头了」表示**不用再翻下一页**，绝不表示「这一页不要了」。
+    /// </summary>
+    private AppendResult Stop(string reason, IReadOnlyList<SearchHit> fresh)
     {
         End = true;
         EndReason = reason;
-        return new AppendResult([], true, reason);
+        return new AppendResult(fresh, true, reason);
     }
 
     /// <summary>
