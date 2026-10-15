@@ -102,6 +102,12 @@ public class MainWindow : Window
     private PackageInspection? _pkgProbe;
     private bool _pkgProbeBusy;
     private string _pkgProbeModId = string.Empty;
+
+    /// <summary>
+    /// 「装前看包」里用户对**包内各个 mod**的勾选（key = 内嵌包文件名，默认全选）。
+    /// 只对当前这条 Mod 有效，换 Mod 就清空。
+    /// </summary>
+    private readonly Dictionary<string, bool> _pkgSel = new(StringComparer.OrdinalIgnoreCase);
     private int _previewIndex;
 
     // ---- 翻译状态 ----
@@ -1538,13 +1544,30 @@ public class MainWindow : Window
 
         ImGui.TextWrapped("下载：" + d.FileNameHint);
         var ok = _plugin.Penumbra.Available;
-        ImGui.BeginDisabled(!ok);
+
+        // 「装前看包」勾选的内嵌包：null = 全装；空列表 = 一个都没勾 → 停用安装
+        var selectedPkgs = SelectedPackagesFor(d);
+        var noneChecked = selectedPkgs is { Count: 0 };
+
+        ImGui.BeginDisabled(!ok || noneChecked);
         if (ImGui.Button("安装到 Penumbra", new Vector2(S(180f), 0)))
         {
             var cover = d.Images.Count > 0 ? d.Images[0] : hit.ThumbUrl;
-            _plugin.Jobs.Enqueue(d, cover);
+            _plugin.Jobs.Enqueue(d, cover, selectedPkgs);
         }
         ImGui.EndDisabled();
+
+        if (noneChecked)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(Red, "上面一个包都没勾");
+        }
+        else if (selectedPkgs is { Count: > 0 })
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(Yellow, $"只装勾选的 {selectedPkgs.Count} 个包");
+        }
+
         if (!ok)
         {
             ImGui.SameLine();
@@ -1568,6 +1591,7 @@ public class MainWindow : Window
         {
             _pkgProbe = null;
             _pkgProbeModId = string.Empty;
+            _pkgSel.Clear();          // 勾选只对当前这条 Mod 有效
         }
 
         ImGui.SameLine();
@@ -1589,10 +1613,34 @@ public class MainWindow : Window
         if (p.Summary is { } s)
         {
             ImGui.TextWrapped($"共 {s.EntryCount} 个条目，解压后约 {s.UncompressedText}");
+
             if (s.ModCount > 0)
-                ImGui.TextWrapped($"内含 {s.ModCount} 个 Mod：" + string.Join("、", s.InnerModPacks.Take(6)));
+            {
+                ImGui.TextWrapped($"内含 {s.ModCount} 个 Mod —— 勾选要装哪些（默认全选）：");
+                foreach (var name in s.InnerModPacks)
+                {
+                    if (!_pkgSel.ContainsKey(name)) _pkgSel[name] = true;      // 默认全选
+                    var on = _pkgSel[name];
+                    if (ImGui.Checkbox(name + "##pkgsel-" + name, ref on)) _pkgSel[name] = on;
+                }
+
+                var chosen = s.InnerModPacks.Count(n => _pkgSel.TryGetValue(n, out var v) && v);
+                if (chosen == 0)
+                    ImGui.TextColored(Red, "一个都没勾 → 安装按钮已停用（要么至少勾一个，要么点「全选」）");
+                else if (chosen == s.ModCount)
+                    ImGui.TextColored(Dim, $"已勾选全部 {chosen} 个 —— 「安装到 Penumbra」会把这 {chosen} 个都装上");
+                else
+                    ImGui.TextColored(Yellow, $"已勾选 {chosen} / {s.ModCount} —— 只会装勾选的这些");
+
+                if (ImGui.SmallButton("全选##pkgsel-all")) { foreach (var n in s.InnerModPacks) _pkgSel[n] = true; }
+                ImGui.SameLine();
+                if (ImGui.SmallButton("全不选##pkgsel-none")) { foreach (var n in s.InnerModPacks) _pkgSel[n] = false; }
+            }
             else
+            {
                 ImGui.TextColored(Dim, "（这个包本身就是一条 Mod，没有嵌套）");
+            }
+
             if (s.TopPaths.Count > 0)
                 ImGui.TextColored(Dim, "顶层：" + string.Join("　", s.TopPaths.Take(8)));
         }
@@ -1600,6 +1648,21 @@ public class MainWindow : Window
         {
             ImGui.TextColored(Dim, p.Note);
         }
+    }
+
+    /// <summary>
+    /// 当前这条 Mod 该装哪些内嵌包。
+    ///   null = 全装（还没看过包内容，或勾选了全部 —— 保持老行为）
+    ///   {}   = 一个都没勾 → 调用方应停用安装按钮
+    ///   非空 = 只装这些（按文件名匹配）
+    /// </summary>
+    private List<string>? SelectedPackagesFor(ModDetail d)
+    {
+        if (!string.Equals(_pkgProbeModId, d.ModId, StringComparison.Ordinal)) return null;
+        if (_pkgProbe?.Summary is not { ModCount: > 0 } s) return null;
+
+        var chosen = s.InnerModPacks.Where(n => _pkgSel.TryGetValue(n, out var on) && on).ToList();
+        return chosen.Count == s.InnerModPacks.Count ? null : chosen;
     }
 
     /// <summary>

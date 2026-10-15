@@ -287,6 +287,28 @@ public static class PackageResolver
         }
     }
 
+    /// <summary>
+    /// 按用户勾选过滤内嵌包：只保留文件名在 <paramref name="selected"/> 里的那些。
+    ///
+    /// 返回**实际保留的数量**。⚠ 规则：**一个都没匹配上时原样返回（全装）** ——
+    /// 「点了安装却什么都没装」比「多装了」坏得多，宁可退回全装也不要静默什么都不做。
+    /// 名字比较不区分大小写（站点文件名大小写不统一）。
+    /// </summary>
+    public static int ApplySelection(List<string> packages, IReadOnlyCollection<string>? selected)
+    {
+        if (selected is null || selected.Count == 0 || packages.Count == 0) return packages.Count;
+
+        var keep = packages
+            .Where(p => selected.Any(s => string.Equals(s, Path.GetFileName(p), StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (keep.Count == 0) return packages.Count;      // 名字对不上 → 不冒险，全装
+
+        packages.Clear();
+        packages.AddRange(keep);
+        return packages.Count;
+    }
+
     /// <summary>mod 目录名：去掉非法字符，别太长（Penumbra 要拿它当目录名）。</summary>
     public static string SafeModDirName(string name, string fallback)
     {

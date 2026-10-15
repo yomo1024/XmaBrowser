@@ -494,6 +494,35 @@ Console.WriteLine("=== 9f. 作者名里的撇号：只清洗 author，绝不动 
 }
 
 Console.WriteLine();
+Console.WriteLine("=== 9g. 装前看包：勾选要装哪些内嵌包 ===");
+{
+    List<string> Pk() => ["/w/a/V1.pmp", "/w/a/V2.pmp", "/w/a/Physics.pmp"];
+
+    var selA = Pk();
+    Check("没勾（null）= 全装，保持老行为",
+          PackageResolver.ApplySelection(selA, null) == 3 && selA.Count == 3);
+    var selB = Pk();
+    Check("勾选集为空 = 全装",
+          PackageResolver.ApplySelection(selB, Array.Empty<string>()) == 3 && selB.Count == 3);
+
+    var selC = Pk();
+    Check("勾了 2 个 → 只留那 2 个",
+          PackageResolver.ApplySelection(selC, ["V1.pmp", "Physics.pmp"]) == 2 && selC.Count == 2
+          && selC.All(x => x.Contains("V1") || x.Contains("Physics")), string.Join(",", selC));
+
+    // ⚠ 安全规则：名字对不上时宁可全装，也绝不能让「点了安装却什么都没装」发生
+    var selD = Pk();
+    Check("一个都没匹配上 → 原样全装（不静默什么都不做）",
+          PackageResolver.ApplySelection(selD, ["不存在的包.pmp"]) == 3 && selD.Count == 3);
+
+    var selE = Pk();
+    Check("按文件名匹配且不区分大小写",
+          PackageResolver.ApplySelection(selE, ["v1.PMP"]) == 1 && selE[0].EndsWith("V1.pmp"), string.Join(",", selE));
+
+    Check("包列表为空 → 返回 0，不抛", PackageResolver.ApplySelection([], ["a.pmp"]) == 0);
+}
+
+Console.WriteLine();
 Console.WriteLine("=== 10. 封面：定位 / 注入包 / 真伪 WebP 判定 ===");
 var ctmp = Path.Combine(Path.GetTempPath(), "XmaBrowserCoverTests", Guid.NewGuid().ToString("n")[..8]);
 Directory.CreateDirectory(ctmp);

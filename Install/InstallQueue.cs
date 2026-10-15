@@ -57,6 +57,18 @@ public sealed class InstallJob
     /// <summary>这条 Mod 在 Penumbra 里的目录名（聚焦窗口/移动时要用真实目录名）。</summary>
     public string ModDirName { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 自动归组不可用时，**每个**新装目录各自的目标虚拟路径。
+    /// 以前只备第一条（`FirstOrDefault()`），多包压缩包时其余 mod 的目标路径被静默丢掉。
+    /// </summary>
+    public List<(string Dir, string Target)> GroupTargets { get; } = [];
+
+    /// <summary>
+    /// 「装前看包」里用户勾选的内嵌包**文件名**（不区分大小写）。null/空 = 全装（默认行为）。
+    /// 只有 zip 家族（.zip/.pmp/.ttmp2）能在下载前列出包内清单，所以只有那条路会填这个。
+    /// </summary>
+    public HashSet<string>? SelectedPackages { get; init; }
+
     public DateTime StartedUtc { get; } = DateTime.UtcNow;
 
     public bool Finished => State is JobState.Done or JobState.Error or JobState.Cancelled;
@@ -173,7 +185,8 @@ public sealed class InstallQueue : IDisposable
         lock (_jobs) return _jobs.ToArray();
     }
 
-    public InstallJob Enqueue(ModDetail detail, string coverUrl = "")
+    public InstallJob Enqueue(ModDetail detail, string coverUrl = "",
+                              IReadOnlyCollection<string>? selectedPackages = null)
     {
         var job = new InstallJob
         {
@@ -185,6 +198,10 @@ public sealed class InstallQueue : IDisposable
             SiteType = detail.Type,
             FileName = PackageResolver.SafeModDirName(detail.FileNameHint, $"mod-{detail.ModId}"),
             Message = "排队中…",
+            // 「装前看包」勾选的内嵌包（null = 全装，保持老行为）
+            SelectedPackages = selectedPackages is { Count: > 0 }
+                ? new HashSet<string>(selectedPackages, StringComparer.OrdinalIgnoreCase)
+                : null,
         };
         lock (_jobs) _jobs.Add(job);
         _wake.Release();
@@ -376,6 +393,23 @@ public sealed class InstallQueue : IDisposable
 
         var packages = plan.Packages;
 
+        // 「装前看包」里勾了要装哪些内嵌包 → 只装勾选的。
+        // （ApplySelection 在一个都没匹配上时会原样返回 = 全装，绝不让「点了安装却什么都没装」发生。）
+        if (job.SelectedPackages is { Count: > 0 })
+        {
+            var wanted = packages.Count;
+            var kept = PackageResolver.ApplySelection(packages, job.SelectedPackages);
+            if (kept < wanted)
+            {
+                LogDiag($"按勾选过滤内嵌包：{wanted} → {kept} 个（只装勾选的）");
+                job.Message = $"只装勾选的 {kept} 个包…";
+            }
+            else
+            {
+                LogDiag($"⚠ 勾选的包名与包内实际文件名对不上（{wanted} 个都没匹配）→ 为安全起见改为全装");
+            }
+        }
+
         // ---------- 3) 装进 Penumbra ----------
         job.State = JobState.Installing;
         job.Message = packages.Count > 0 ? $"安装 {packages.Count} 个包…" : "登记 Mod 目录…";
@@ -517,16 +551,25 @@ public sealed class InstallQueue : IDisposable
 
             if (SetModPathNoOp)
             {
-                // 本机 Penumbra 的 SetModPath 是空实现 → 不重试，改为给用户备好「目标虚拟路径」
-                var target = newDirs.Concat(addedNames).FirstOrDefault() is { Length: > 0 } d
-                    ? GroupPath.BuildFullPath(folder, d)
-                    : string.Empty;
-                if (target.Length > 0)
+                // 本机 Penumbra 的 SetModPath 是空实现 → 不重试，改为给用户备好「目标虚拟路径」。
+                // ⚠ **每个目录都要备**：以前只取 FirstOrDefault()，多包压缩包时其余 mod 的目标路径
+                //    被静默丢掉，用户根本不知道那几个该往哪儿搬。
+                foreach (var d in newDirs.Concat(addedNames).Distinct(StringComparer.OrdinalIgnoreCase))
                 {
-                    job.GroupTargetPath = target;
-                    job.ModDirName = newDirs.Concat(addedNames).First();
-                    job.Message += $"（自动归组不可用：在 Penumbra 里对它右键 → Move Mod，粘贴 {target}）";
-                    LogDiag($"自动归组不可用，已备好目标路径：{target}");
+                    var t = GroupPath.BuildFullPath(folder, d);
+                    if (t.Length > 0) job.GroupTargets.Add((d, t));
+                }
+
+                if (job.GroupTargets.Count > 0)
+                {
+                    job.ModDirName = job.GroupTargets[0].Dir;
+                    job.GroupTargetPath = job.GroupTargets[0].Target;      // 兼容单条的老字段
+                    job.Message += job.GroupTargets.Count == 1
+                        ? $"（自动归组不可用：在 Penumbra 里对它右键 → Move Mod，粘贴 {job.GroupTargets[0].Target}）"
+                        : $"（自动归组不可用：这 {job.GroupTargets.Count} 个 Mod 各自的目标路径见下面清单）";
+                    LogDiag($"自动归组不可用，已备好 {job.GroupTargets.Count} 条目标路径：");
+                    foreach (var (dir, target) in job.GroupTargets)
+                        LogDiag($"    {dir} → {target}");
                 }
             }
             else
@@ -598,9 +641,17 @@ public sealed class InstallQueue : IDisposable
     {
         var ok = 0;
         var done = 0;
+
+        // ⚠⚠ 多包压缩包里**每个目录是不同的 mod**，必须各用各的名字。
+        // 以前这里一律传 job.Title（站点那条 Mod 的标题）→ 它们全都想搬到同一个目标路径
+        // → 第一个成功、其余全部 ItemExists 失败（主人日志里那几条 PathRenameFailed 就是这个）。
+        // 只有「本次只装了一条」时才用站点标题当显示名（那时改名更友好，也不会撞车）。
+        var single = dirs.Count == 1;
+
         foreach (var dir in dirs)
         {
-            var (success, message) = GroupOne(dir, job.Title, folder);
+            var displayName = single ? job.Title : dir;
+            var (success, message) = GroupOne(dir, displayName, folder);
             if (success) ok++;
             done++;
             _log.Info($"归组【{job.Title}】：{(success ? "成功" : "失败")} — {message}");
